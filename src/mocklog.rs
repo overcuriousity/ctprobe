@@ -230,8 +230,7 @@ impl MockLog {
 
 /// Issues real certificates from one test CA.
 pub struct TestCa {
-    cert: rcgen::Certificate,
-    key: rcgen::KeyPair,
+    issuer: rcgen::Issuer<'static, rcgen::KeyPair>,
 }
 
 impl Default for TestCa {
@@ -241,7 +240,7 @@ impl Default for TestCa {
         p.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         p.distinguished_name.push(rcgen::DnType::CommonName, "Test CA");
         p.distinguished_name.push(rcgen::DnType::OrganizationName, "Test Org");
-        TestCa { cert: p.self_signed(&key).unwrap(), key }
+        TestCa { issuer: rcgen::Issuer::new(p, key) }
     }
 }
 
@@ -256,7 +255,7 @@ impl TestCa {
         if let Some(n) = names.first() {
             p.distinguished_name.push(rcgen::DnType::CommonName, *n);
         }
-        let der = p.signed_by(&key, &self.cert, &self.key).unwrap().der().to_vec();
+        let der = p.signed_by(&key, &self.issuer).unwrap().der().to_vec();
         MockEntry { precert: false, body: der, timestamp_ms: 1_800_000_000_000, corrupt: false }
     }
 

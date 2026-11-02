@@ -18,12 +18,12 @@ const BLOOM_NDV: u64 = 5_000_000;
 fn props(bloom: bool) -> WriterProperties {
     let mut b = WriterProperties::builder()
         .set_compression(Compression::ZSTD(ZstdLevel::try_new(6).expect("valid level")))
-        .set_max_row_group_size(1_000_000);
+        .set_max_row_group_row_count(Some(1_000_000));
     if bloom {
         let c = ColumnPath::from("primary_domain");
         b = b
             .set_column_bloom_filter_enabled(c.clone(), true)
-            .set_column_bloom_filter_ndv(c.clone(), BLOOM_NDV)
+            .set_column_bloom_filter_max_ndv(c.clone(), BLOOM_NDV)
             .set_column_bloom_filter_fpp(c, 0.01);
     }
     b.build()

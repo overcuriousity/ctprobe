@@ -52,7 +52,7 @@ pub struct RollupMinuteRow {
 fn props() -> WriterProperties {
     WriterProperties::builder()
         .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).expect("valid level")))
-        .set_max_row_group_size(1_000_000)
+        .set_max_row_group_row_count(Some(1_000_000))
         .build()
 }
 

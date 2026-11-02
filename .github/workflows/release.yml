@@ -27,7 +27,7 @@ jobs:
             runner: ubuntu-22.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y cmake pkg-config
@@ -37,7 +37,7 @@ jobs:
           name=ctprobe-linux-${{ matrix.arch }}.tar.gz
           tar -czf "$name" -C target/release ctprobe -C "$PWD" deploy
           sha256sum "$name" > "$name.sha256"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.arch }}
           path: ctprobe-linux-*
@@ -51,7 +51,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           merge-multiple: true
       # One rolling release. The installer reads it through /releases/latest/.

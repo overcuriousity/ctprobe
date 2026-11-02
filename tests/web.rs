@@ -211,15 +211,21 @@ async fn pages_have_csp_and_render() {
     a.pipe.shutdown().await.unwrap();
 }
 
+/// Waits until `n` entries are readable, not merely received: commits run on a
+/// timer, and a loaded machine can take far longer than any fixed sleep.
 async fn wait_rows(a: &App, n: u64) {
-    tokio::time::timeout(Duration::from_secs(20), async {
-        while a.pipe.handle.live.snapshot().raw_total < n {
+    let url = format!("{}/api/sql?q=SELECT%20COUNT(*)%20AS%20n%20FROM%20sightings", a.base);
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let v = get_json(url.clone()).await;
+            if v["rows"][0][0].as_u64().is_some_and(|c| c >= n) {
+                return;
+            }
             tokio::time::sleep(Duration::from_millis(30)).await;
         }
     })
     .await
-    .expect("entries did not arrive");
-    tokio::time::sleep(Duration::from_millis(400)).await; // Let a commit land.
+    .expect("entries did not become readable");
 }
 
 #[tokio::test(flavor = "multi_thread")]
