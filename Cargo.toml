@@ -39,7 +39,7 @@ redb = "2"
 fst = { version = "0.4", features = ["levenshtein"] }
 strsim = "0.11"
 chrono = { version = "0.4", features = ["serde"] }
-datafusion = "47"
+datafusion = "55"
 arrow = "55"
 parquet = { version = "55", features = ["arrow", "zstd"] }
 sqlparser = "0.55"
