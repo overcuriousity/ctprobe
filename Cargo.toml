@@ -45,7 +45,7 @@ parquet = { version = "55", features = ["arrow", "zstd"] }
 sqlparser = "0.55"
 memmap2 = "0.9"
 axum = "0.8"
-tower-http = { version = "0.6", features = ["set-header"] }
+tower-http = { version = "0.7", features = ["set-header"] }
 rust-embed = "8"
 sd-notify = "0.4"
 libc = "0.2"
