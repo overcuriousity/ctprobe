@@ -1,0 +1,23 @@
+<h1>Trends</h1>
+<div class="controls">
+  <label>Range
+    <select id="range" aria-label="Time range">
+      <option value="6:minute" selected>6 hours</option>
+      <option value="48:hour">48 hours</option>
+      <option value="336:hour">14 days</option>
+      <option value="2160:day">90 days</option>
+      <option value="87600:day">All</option>
+    </select>
+  </label>
+  <span class="note" id="asof"></span>
+</div>
+<section class="tiles" id="cost"></section>
+<section class="grid" id="charts"></section>
+<section class="grid">
+  <div class="card"><h2 data-tip="stages">Processing stages by day</h2><p class="sub">Each stage is what the next one must handle</p><div class="scroll" id="stages"></div></div>
+  <div class="card"><h2 data-tip="coverage">Log coverage</h2><p class="sub">Best N logs for the last finished day; available after the first nightly run</p><div class="scroll" id="coverage"></div></div>
+</section>
+<section class="grid">
+  <div class="card"><h2 data-tip="lag">Detection latency by log</h2><p class="sub">Delay until we saw the entry, from its SCT timestamp and from notBefore</p><div class="scroll" id="lag"></div></div>
+  <div class="card"><h2 data-tip="capacity">Catch-up by log</h2><p class="sub">Fetched and published per second over the range</p><div class="scroll" id="catchup"></div></div>
+</section>

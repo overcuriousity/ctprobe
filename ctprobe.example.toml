@@ -1,0 +1,14 @@
+bind = "0.0.0.0:8080"
+data_dir = "./data"
+disk_budget = "4GiB"
+tracker_max = "2GiB"
+# Substring matches against log names; empty include means all logs.
+include_logs = []
+exclude_logs = []
+log_list_url = "https://www.gstatic.com/ct/log_list/v3/log_list.json"
+# Further lists; a log on any list is followed. A list that cannot be read is skipped.
+extra_log_lists = ["https://valid.apple.com/ct/log_list/current_log_list.json"]
+# Test and staging logs. They then count in every figure.
+include_test_logs = false
+# Percent of certificates the coverage assessment aims for.
+coverage_target = 95

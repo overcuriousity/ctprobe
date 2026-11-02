@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{title}} · ctprobe</title>
+<link rel="stylesheet" href="/assets/uplot.min.css">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body data-page="{{page}}">
+<header class="top">
+  <a class="brand" href="/">ctprobe</a>
+  <nav>
+    <a href="/" data-nav="live">Live</a>
+    <a href="/sizing" data-nav="sizing">Sizing</a>
+    <a href="/trends" data-nav="trends">Trends</a>
+    <a href="/search" data-nav="search">Search</a>
+    <a href="/sql" data-nav="sql">SQL</a>
+  </nav>
+  <span id="status" class="status" role="status"></span>
+  <button id="lang" class="ghost small" type="button" aria-label="Switch language">EN</button>
+  <button id="theme" class="ghost small" type="button" aria-label="Switch colour theme">Theme</button>
+</header>
+<div id="banner" class="banner" hidden></div>
+<main>
+{{body}}
+</main>
+<script src="/assets/i18n.js"></script>
+<script src="/assets/uplot.min.js"></script>
+<script src="/assets/app.js"></script>
+<script src="/assets/{{page}}.js"></script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+<h1>SQL</h1>
+<section class="grid">
+  <div class="card">
+    <p class="sub">Read-only. One SELECT, 30 second limit. Ctrl+Enter runs it.</p>
+    <textarea id="q" spellcheck="false" aria-label="SQL query"></textarea>
+    <div class="controls" style="margin-top:10px">
+      <button id="run" type="button">Run</button>
+      <a id="csv" href="#">CSV</a>
+      <select id="examples" aria-label="Example queries"><option value="">Examples</option></select>
+      <span class="note" id="state"></span>
+    </div>
+  </div>
+  <div class="card"><h2>Tables</h2><div class="scroll" id="tables" style="max-height:240px" data-raw></div></div>
+</section>
+<div class="card"><div class="scroll" id="result" data-raw></div></div>

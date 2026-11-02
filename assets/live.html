@@ -1,0 +1,40 @@
+<h1>Live</h1>
+<section class="tiles" id="tiles"></section>
+<p class="note" id="tiles-note"></p>
+<section class="grid">
+  <div class="card">
+    <div class="card-head">
+      <div><h2>Rates</h2><p class="sub">Entries per second, 60-second average, all logs</p></div>
+      <select id="timeframe" aria-label="Time frame">
+        <option value="5">5 minutes</option>
+        <option value="15" selected>15 minutes</option>
+        <option value="60">1 hour</option>
+        <option value="360">6 hours</option>
+        <option value="720">12 hours</option>
+        <option value="1440">24 hours</option>
+      </select>
+    </div>
+    <div id="rate"></div>
+  </div>
+  <div class="card">
+    <h2 id="stages-h">From log entries to new domains</h2>
+    <p class="sub" id="stages-sub"></p>
+    <div id="stages"></div>
+  </div>
+</section>
+<div class="card" style="margin-bottom:14px">
+  <h2 id="keeping-h">Keeping up?</h2>
+  <div id="keeping"></div>
+</div>
+<div class="card" id="logs-card" style="margin-bottom:14px">
+  <h2>Logs</h2>
+  <p class="sub" id="logsub"></p>
+  <div id="coverage"></div>
+  <div id="logs"></div>
+</div>
+<div class="card">
+  <h2>New certificates</h2>
+  <p class="sub">Filtered text feed, at most 200 per second</p>
+  <div class="controls"><input id="filter" type="search" placeholder="Filter by name" aria-label="Filter feed"></div>
+  <div class="feed" id="feed"></div>
+</div>

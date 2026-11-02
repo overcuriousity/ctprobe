@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+# Runs in order, so an older commit can never overwrite a newer build.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y cmake pkg-config
+      - run: cargo build --release --locked
+      - name: Package
+        run: |
+          name=ctprobe-linux-${{ matrix.arch }}.tar.gz
+          tar -czf "$name" -C target/release ctprobe -C "$PWD" deploy
+          sha256sum "$name" > "$name.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.arch }}
+          path: ctprobe-linux-*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      # One rolling release. The installer reads it through /releases/latest/.
+      - name: Publish
+        run: |
+          notes="Built from ${GITHUB_SHA}."
+          if gh release view latest >/dev/null 2>&1; then
+            gh api -X PATCH "repos/$GH_REPO/git/refs/tags/latest" -f sha="$GITHUB_SHA" -F force=true
+            gh release upload latest ctprobe-linux-* --clobber
+            gh release edit latest --notes "$notes" --latest
+          else
+            gh release create latest ctprobe-linux-* --target "$GITHUB_SHA" --title "Latest build" --notes "$notes" --latest
+          fi

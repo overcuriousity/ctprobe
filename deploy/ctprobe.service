@@ -1,0 +1,29 @@
+[Unit]
+Description=ctprobe Certificate Transparency measurement service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/ctprobe run --config /etc/ctprobe/config.toml
+Restart=on-failure
+RestartSec=5
+# Snapshots of a large tracker are slow on HDD; these cover loading and writing one.
+WatchdogSec=600
+TimeoutStartSec=1800
+TimeoutStopSec=300
+DynamicUser=yes
+StateDirectory=ctprobe
+LimitNOFILE=65536
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target

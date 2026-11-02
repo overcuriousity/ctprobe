@@ -1,0 +1,24 @@
+<div class="filters" style="margin-bottom:6px">
+  <h1 style="margin:0">Certificate Transparency volume</h1>
+  <div class="row-actions">
+    <select id="range" aria-label="Period"><option value="168:hour">Last 7 days</option><option value="720:hour" selected>Last 30 days</option><option value="87600:day">All data</option></select>
+    <button id="csv" class="ghost" type="button">Export CSV</button>
+    <button id="print" type="button">Print or save PDF</button>
+  </div>
+</div>
+<p class="lead" id="lead"></p>
+<section class="hero" id="hero"></section>
+<div class="card" style="margin-bottom:14px">
+  <h2>All figures</h2>
+  <p class="sub">The confidence column says how far each figure can be used for sizing today.</p>
+  <div id="figures"></div>
+</div>
+<section class="grid">
+  <div class="card"><h2 id="settle-h">Never-seen domains</h2><p class="sub">Per second. A flattening curve means the figure is reaching its real level.</p><div id="settling"></div></div>
+  <div class="card"><h2 id="stages-h">Processing stages</h2><p class="sub" id="stages-sub"></p><div id="stages"></div></div>
+</section>
+<section class="grid">
+  <div class="card"><h2 id="quality-h">Data quality</h2><p class="sub">Backlog over time</p><div id="quality-tiles" class="tiles"></div><div id="quality"></div></div>
+  <div class="card"><h2 id="keeping-h">Keeping up?</h2><div id="keeping"></div></div>
+</section>
+<div class="card"><h2>Logs needing attention</h2><p class="sub">Logs that are behind, rate-limiting us, or failing</p><div id="coverage"></div><div id="logs"></div></div>

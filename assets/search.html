@@ -1,0 +1,23 @@
+<h1>Search</h1>
+<form class="controls" id="form">
+  <input id="q" type="search" placeholder="example.com, paypal, or %.example.com" aria-label="Search" autofocus>
+  <select id="mode" aria-label="Match type">
+    <option value="exact">Exact domain</option>
+    <option value="contains">Contains</option>
+    <option value="levenshtein">Levenshtein</option>
+    <option value="homoglyph">Homoglyph</option>
+    <option value="names">All names (slow)</option>
+  </select>
+  <select id="distance" aria-label="Edit distance" hidden><option value="1">Distance 1</option><option value="2">Distance 2</option></select>
+  <button type="submit">Search</button>
+  <span class="note" id="state"></span>
+</form>
+<p class="note">A query without a dot compares against each domain's first label, so <code>paypal</code> finds lookalikes under any TLD. Use <code>%</code> as a wildcard in All names.</p>
+<div class="stack">
+  <div class="card" id="hits-card" hidden><h2>Domains</h2><p class="sub">Closest first. Select one for its full picture.</p><div class="scroll" id="hits"></div></div>
+  <div class="card" id="certs-card" hidden>
+    <h2 id="certs-title">Certificates</h2>
+    <p class="sub">Certificates are kept for the rolling window; older ones appear only in totals, so counts can differ from Trends on long ranges.</p>
+    <div id="certs"></div>
+  </div>
+</div>

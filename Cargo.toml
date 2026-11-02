@@ -1,0 +1,79 @@
+[package]
+name = "ctprobe"
+version = "0.1.0"
+edition = "2021"
+description = "Measures the Certificate Transparency ecosystem in real time and searches recent certificates"
+license = "MIT"
+repository = "https://github.com/overcuriousity/ctprobe"
+
+[features]
+default = []
+mock = ["dep:wiremock", "dep:flate2", "dep:rcgen"]
+
+[dependencies]
+anyhow = "1"
+thiserror = "2"
+bytes = "1"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync", "time"] }
+futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "json", "stream"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+webpki-roots = "1"
+x509-parser = "0.17"
+psl = "2"
+idna = "1"
+unicode-security = "0.1"
+hashbrown = "0.15"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+hdrhistogram = "7"
+rayon = "1"
+redb = "2"
+fst = { version = "0.4", features = ["levenshtein"] }
+strsim = "0.11"
+chrono = { version = "0.4", features = ["serde"] }
+datafusion = "47"
+arrow = "55"
+parquet = { version = "55", features = ["arrow", "zstd"] }
+sqlparser = "0.55"
+memmap2 = "0.9"
+axum = "0.8"
+tower-http = { version = "0.6", features = ["set-header"] }
+rust-embed = "8"
+sd-notify = "0.4"
+libc = "0.2"
+wiremock = { version = "0.6", optional = true }
+flate2 = { version = "1", optional = true }
+rcgen = { version = "0.13", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+lto = "thin"
+
+[[test]]
+name = "fetch"
+required-features = ["mock"]
+
+[[test]]
+name = "pipeline"
+required-features = ["mock"]
+
+[[test]]
+name = "web"
+required-features = ["mock"]
+
+[[test]]
+name = "shutdown"
+required-features = ["mock"]
