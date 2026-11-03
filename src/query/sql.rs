@@ -2,7 +2,7 @@ use super::buckets::{san_case, size_case, validity_case};
 use super::QueryEngine;
 use crate::store::{
     certs_schema, daily_coverage_schema, daily_stages_schema, daily_top_schema, day_string,
-    domains_schema, list_parts, register_files, rollup_daily_schema, rollup_minute_schema, session,
+    dns_minute_schema, dns_schema, domains_schema, list_parts, register_files, rollup_daily_schema, rollup_minute_schema, session,
     sightings_schema,
 };
 use anyhow::Result;
@@ -232,7 +232,9 @@ async fn context(data: &Path, from: Option<i64>, to: Option<i64>) -> Result<Sess
     let ctx = session(data, MEMORY, PARTITIONS)?;
     let ranged = in_range(data, "certs", from, to);
     register_files(&ctx, "certs", certs_schema(), &ranged).await?;
-    let tables: [(&str, SchemaRef); 6] = [
+    register_files(&ctx, "dns", dns_schema(), &in_range(data, "dns", from, to)).await?;
+    let tables: [(&str, SchemaRef); 7] = [
+        ("dns_minute", dns_minute_schema()),
         ("sightings", sightings_schema()),
         ("rollup_minute", rollup_minute_schema()),
         ("rollup_daily", rollup_daily_schema()),

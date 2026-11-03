@@ -130,3 +130,43 @@ schema!(domains_schema, [
     ("last_seen", ts(), false),
     ("cert_count", Int64, false),
 ]);
+
+schema!(dns_schema, [
+    ("probed_at", ts(), false),
+    ("name", Utf8, false),
+    ("reg_domain", Utf8, true),
+    ("cert_hash", UInt64, false),
+    ("cert_seen_at", ts(), false),
+    ("attempt", Int32, false),
+    ("renewal", Utf8, false),
+    ("status", Utf8, false),
+    ("v4", list(), false),
+    ("v6", list(), false),
+    ("cnames", list(), false),
+    ("ttl", Int64, true),
+    ("latency_ms", Int32, false),
+    ("agree", Int32, false),
+    ("changed", Boolean, true),
+    ("network_changed", Boolean, true),
+    ("prev_days", Int32, true),
+]);
+
+schema!(dns_minute_schema, [
+    ("minute", ts(), false),
+    ("probes", Int64, false),
+    ("first_probes", Int64, false),
+    ("first_resolved", Int64, false),
+    ("first_v4", Int64, false),
+    ("first_v6", Int64, false),
+    ("first_nodata", Int64, false),
+    ("first_nxdomain", Int64, false),
+    ("first_failed", Int64, false),
+    ("resolved_later", Int64, false),
+    ("never", Int64, false),
+    ("compared", Int64, false),
+    ("changed", Int64, false),
+    ("network_changed", Int64, false),
+    ("skipped", Int64, false),
+    ("ttd_p50_ms", Int64, true),
+    ("ttd_p90_ms", Int64, true),
+]);

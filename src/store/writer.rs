@@ -1,4 +1,8 @@
-use super::{certs_schema, day_string, domains_schema, rollup_minute_schema, sightings_schema};
+use super::{
+    certs_schema, day_string, dns_minute_schema, dns_schema, domains_schema, rollup_minute_schema,
+    sightings_schema,
+};
+use crate::dns::{DnsMinuteRow, DnsRow};
 use crate::names;
 use crate::types::{CertRow, LogId, Sighting};
 use anyhow::{Context, Result};
@@ -82,6 +86,8 @@ pub struct Writer {
     certs: Vec<CertRow>,
     sightings: Vec<Sighting>,
     rollups: Vec<RollupMinuteRow>,
+    dns: Vec<DnsRow>,
+    dns_minute: Vec<DnsMinuteRow>,
     domains: HashMap<String, DomainDelta>,
     pending: Vec<(PathBuf, PathBuf)>,
 }
@@ -127,6 +133,8 @@ impl Writer {
             certs: Vec::new(),
             sightings: Vec::new(),
             rollups: Vec::new(),
+            dns: Vec::new(),
+            dns_minute: Vec::new(),
             domains: HashMap::new(),
             pending: Vec::new(),
         })
@@ -152,6 +160,14 @@ impl Writer {
 
     pub fn push_rollup(&mut self, r: RollupMinuteRow) {
         self.rollups.push(r);
+    }
+
+    pub fn push_dns(&mut self, r: DnsRow) {
+        self.dns.push(r);
+    }
+
+    pub fn push_dns_minute(&mut self, r: DnsMinuteRow) {
+        self.dns_minute.push(r);
     }
 
     pub fn buffered_certs(&self) -> usize {
@@ -202,6 +218,24 @@ impl Writer {
         for (day, rows) in by_day {
             let b = rollup_batch(&rows)?;
             self.write("rollup_minute", &day, &stamp, b)?;
+        }
+
+        let mut by_day: BTreeMap<String, Vec<DnsRow>> = BTreeMap::new();
+        for r in self.dns.drain(..) {
+            by_day.entry(day_string(r.probed_at_ms)).or_default().push(r);
+        }
+        for (day, rows) in by_day {
+            let b = dns_batch(&rows)?;
+            self.write("dns", &day, &stamp, b)?;
+        }
+
+        let mut by_day: BTreeMap<String, Vec<DnsMinuteRow>> = BTreeMap::new();
+        for r in self.dns_minute.drain(..) {
+            by_day.entry(day_string(r.minute_ms)).or_default().push(r);
+        }
+        for (day, rows) in by_day {
+            let b = dns_minute_batch(&rows)?;
+            self.write("dns_minute", &day, &stamp, b)?;
         }
 
         if !self.domains.is_empty() {
@@ -394,3 +428,94 @@ fn domains_batch(rows: &[(String, DomainDelta)]) -> Result<RecordBatch> {
     )
 }
 
+
+fn dns_batch(rows: &[DnsRow]) -> Result<RecordBatch> {
+    let ts = |f: &dyn Fn(&DnsRow) -> i64| -> ArrayRef {
+        let mut b = TimestampMillisecondBuilder::with_capacity(rows.len());
+        rows.iter().for_each(|r| b.append_value(f(r)));
+        Arc::new(b.finish())
+    };
+    let s = |f: &dyn Fn(&DnsRow) -> Option<&str>| -> ArrayRef {
+        let mut b = StringBuilder::new();
+        rows.iter().for_each(|r| b.append_option(f(r)));
+        Arc::new(b.finish())
+    };
+    let i32c = |f: &dyn Fn(&DnsRow) -> Option<i32>| -> ArrayRef {
+        let mut b = Int32Builder::with_capacity(rows.len());
+        rows.iter().for_each(|r| b.append_option(f(r)));
+        Arc::new(b.finish())
+    };
+    let boolc = |f: &dyn Fn(&DnsRow) -> Option<bool>| -> ArrayRef {
+        let mut b = BooleanBuilder::with_capacity(rows.len());
+        rows.iter().for_each(|r| b.append_option(f(r)));
+        Arc::new(b.finish())
+    };
+    let listc = |f: &dyn Fn(&DnsRow) -> Vec<String>| -> ArrayRef {
+        let mut b = ListBuilder::new(StringBuilder::new());
+        for r in rows {
+            for v in f(r) {
+                b.values().append_value(v);
+            }
+            b.append(true);
+        }
+        Arc::new(b.finish())
+    };
+    let mut hash = UInt64Builder::with_capacity(rows.len());
+    rows.iter().for_each(|r| hash.append_value(r.cert_hash));
+    let mut ttl = Int64Builder::with_capacity(rows.len());
+    rows.iter().for_each(|r| ttl.append_option(r.lookup.ttl.map(i64::from)));
+    batch(
+        dns_schema(),
+        vec![
+            ts(&|r| r.probed_at_ms),
+            s(&|r| Some(&r.name)),
+            s(&|r| r.reg_domain.as_deref()),
+            Arc::new(hash.finish()),
+            ts(&|r| r.cert_seen_at_ms),
+            i32c(&|r| Some(r.attempt as i32)),
+            s(&|r| Some(r.renewal)),
+            s(&|r| Some(r.lookup.status.as_str())),
+            listc(&|r| r.lookup.v4.iter().map(|a| a.to_string()).collect()),
+            listc(&|r| r.lookup.v6.iter().map(|a| a.to_string()).collect()),
+            listc(&|r| r.lookup.cnames.clone()),
+            Arc::new(ttl.finish()),
+            i32c(&|r| Some(r.latency_ms.min(i32::MAX as u32) as i32)),
+            i32c(&|r| Some(r.agree as i32)),
+            boolc(&|r| r.changed),
+            boolc(&|r| r.network_changed),
+            i32c(&|r| r.prev_days.map(i32::from)),
+        ],
+    )
+}
+
+fn dns_minute_batch(rows: &[DnsMinuteRow]) -> Result<RecordBatch> {
+    let c = |f: &dyn Fn(&DnsMinuteRow) -> Option<i64>| -> ArrayRef {
+        let mut b = Int64Builder::with_capacity(rows.len());
+        rows.iter().for_each(|r| b.append_option(f(r)));
+        Arc::new(b.finish())
+    };
+    let mut t = TimestampMillisecondBuilder::with_capacity(rows.len());
+    rows.iter().for_each(|r| t.append_value(r.minute_ms));
+    batch(
+        dns_minute_schema(),
+        vec![
+            Arc::new(t.finish()),
+            c(&|r| Some(r.probes)),
+            c(&|r| Some(r.first_probes)),
+            c(&|r| Some(r.first_resolved)),
+            c(&|r| Some(r.first_v4)),
+            c(&|r| Some(r.first_v6)),
+            c(&|r| Some(r.first_nodata)),
+            c(&|r| Some(r.first_nxdomain)),
+            c(&|r| Some(r.first_failed)),
+            c(&|r| Some(r.resolved_later)),
+            c(&|r| Some(r.never)),
+            c(&|r| Some(r.compared)),
+            c(&|r| Some(r.changed)),
+            c(&|r| Some(r.network_changed)),
+            c(&|r| Some(r.skipped)),
+            c(&|r| r.ttd_p50_ms),
+            c(&|r| r.ttd_p90_ms),
+        ],
+    )
+}

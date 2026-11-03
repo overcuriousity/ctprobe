@@ -40,6 +40,15 @@ const HELP = {
   capacity: 'What each log published and what we fetched over the range. A log that stays below its published rate falls further behind.',
   cost: 'Measured on this machine, so re-check on the target hardware. Disk figures fall after nightly compaction.',
   tracker: 'Names held in memory for renewal detection. It grows daily.',
+  dnsfirst: 'A and AAAA of each name, asked when its certificate is seen. Names seen before belong to probable renewals. Wildcards are not probed, since they name no host.',
+  dnslater: 'A name without an address is asked again on a fixed schedule from its sighting until it resolves or the schedule ends. The time found is when the probe that first got an address ran.',
+  dnschanges: 'Any change counts a different address, alias or outcome. Network change ignores addresses rotating behind the same alias and, without an alias, within the same /24 or /48.',
+  dnsearlier: 'Mostly renewals and reissues, whose names last resolved on an earlier day.',
+  dnssameday: 'Mostly the same name in another certificate on the same day, such as from a second CA.',
+  dnsflow: 'Probing never slows ingest. Names that do not fit the query budget are skipped and counted here, so shares describe the names that were probed.',
+  dnsresolvers: 'Disagreed counts probes where a resolver reported another outcome than the one decided. A filtering resolver answers NXDOMAIN for blocked names and shows up here.',
+  nxdomain: 'The resolver says the name does not exist. A recursive resolver caches this, so keep its negative cache short or later probes repeat the cached answer.',
+  quorum: 'No outcome was reported by enough resolvers.',
   validity: 'Certificate lifetime. Shorter limits take effect in March 2027 and March 2029, so the same sites will issue more often.',
 };
 function info(key) {

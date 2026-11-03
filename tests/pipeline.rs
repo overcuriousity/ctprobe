@@ -21,6 +21,7 @@ fn cfg(dir: &Path) -> Config {
         extra_log_lists: vec![],
         include_test_logs: false,
         coverage_target: 95.0,
+        dns: Default::default(),
     }
 }
 
@@ -52,6 +53,7 @@ fn opts(logs: Vec<LogSpec>, commit: Duration) -> PipelineOpts {
         nightly: false,
         snapshot_every: Duration::from_secs(86400),
         coverage_every: Duration::from_secs(86400),
+        dns: Default::default(),
     }
 }
 

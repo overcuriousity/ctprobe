@@ -51,6 +51,14 @@ pub async fn live(State(s): State<AppState>) -> Response {
     Json(s.pipe.live.snapshot()).into_response()
 }
 
+/// DNS probing figures since start, or `enabled: false` when it is off.
+pub async fn dns(State(s): State<AppState>) -> Response {
+    match &s.pipe.dns {
+        Some(d) => Json(d.report()).into_response(),
+        None => Json(json!({ "enabled": false })).into_response(),
+    }
+}
+
 pub async fn logs(State(s): State<AppState>) -> Response {
     Json(s.pipe.live.logs_report()).into_response()
 }

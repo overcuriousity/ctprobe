@@ -53,7 +53,7 @@ pub async fn run_nightly(cfg: &Config, day: NaiveDate) -> Result<()> {
 /// Removes what a crash may leave behind: parts hidden by a daily file and
 /// domain files hidden by a newer snapshot.
 pub fn cleanup(data: &Path) -> Result<()> {
-    for table in ["certs", "sightings", "rollup_minute"] {
+    for table in ["certs", "sightings", "rollup_minute", "dns", "dns_minute"] {
         let Ok(rd) = std::fs::read_dir(data.join(table)) else { continue };
         for dir in rd.flatten().map(|e| e.path()) {
             if !dir.join("daily.parquet").exists() {

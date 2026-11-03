@@ -75,6 +75,8 @@ pub fn router(state: AppState) -> Router {
         .route("/sql", get(|| async { page("sql", "SQL") }))
         .route("/sizing", get(|| async { page("sizing", "Sizing") }))
         .route("/domain", get(|| async { page("domain", "Domain") }))
+        .route("/dns", get(|| async { page("dns", "DNS") }))
+        .route("/api/dns", get(api::dns))
         .route("/api/domain", get(api::domain))
         .route("/api/trends/{metric}", get(trends::trends))
         .route("/api/schema", get(trends::schema))

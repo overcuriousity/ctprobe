@@ -1,0 +1,25 @@
+<h1>DNS</h1>
+<p class="lead" id="lead"></p>
+<section class="tiles" id="tiles"></section>
+<section class="grid">
+  <div class="card"><h2 id="first-h">First probe</h2><p class="sub">What each name resolved to when its certificate was seen</p><div class="scroll" id="first"></div></div>
+  <div class="card"><h2 id="later-h">Time to DNS</h2><p class="sub">Names without an address at first, probed again on a schedule</p><div id="later"></div></div>
+</section>
+<section class="grid">
+  <div class="card"><h2 id="changes-h">Changes between certificates</h2><p class="sub">A name's first probe against the last answer held for it</p><div class="scroll" id="changes"></div></div>
+  <div class="card"><h2 id="flow-h">Names probed</h2><p class="sub">Every name of every unique certificate, renewals included</p><div id="flow"></div></div>
+</section>
+<div class="card" style="margin-bottom:14px"><h2 id="resolvers-h">Resolvers</h2><p class="sub" id="resolvers-sub"></p><div class="scroll" id="resolvers"></div></div>
+<div class="card">
+  <div class="card-head">
+    <div><h2>Over time</h2><p class="sub">Shares of first probes, and of answers that changed since an earlier day</p></div>
+    <select id="range" aria-label="Time range">
+      <option value="6:minute">6 hours</option>
+      <option value="48:hour" selected>48 hours</option>
+      <option value="336:hour">14 days</option>
+      <option value="2160:day">90 days</option>
+    </select>
+  </div>
+  <div id="trend"></div>
+  <p class="note"><a id="trend-csv" href="/api/trends/dns?format=csv">CSV</a></p>
+</div>

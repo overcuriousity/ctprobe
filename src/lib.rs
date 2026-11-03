@@ -1,5 +1,6 @@
 pub mod config;
 pub mod coverage;
+pub mod dns;
 pub mod types;
 pub mod parse;
 pub mod names;

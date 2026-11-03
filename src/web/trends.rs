@@ -15,7 +15,7 @@ use serde_json::json;
 pub const METRICS: &[&str] = &[
     "volume", "stages", "renewals", "issuers", "tlds", "keys", "validity", "san_dist", "der_size",
     "peaks", "lag", "concentration", "coverage", "state_growth", "catchup", "cost", "resources",
-    "settling", "quality", "sizing",
+    "settling", "quality", "sizing", "dns",
 ];
 
 const ROWS: usize = 20_000;
@@ -57,6 +57,18 @@ pub fn trend_query(metric: &str, from: i64, to: i64, bucket: &str, today: i64, h
         _ => 86400,
     };
     Some(match metric {
+        "dns" => format!(
+            "SELECT {t}, \
+               100.0 * SUM(first_resolved) / NULLIF(SUM(first_probes), 0) AS resolved_pct, \
+               100.0 * SUM(first_v4) / NULLIF(SUM(first_probes), 0) AS v4_pct, \
+               100.0 * SUM(first_v6) / NULLIF(SUM(first_probes), 0) AS v6_pct, \
+               100.0 * SUM(first_nxdomain) / NULLIF(SUM(first_probes), 0) AS nxdomain_pct, \
+               100.0 * SUM(changed) / NULLIF(SUM(compared), 0) AS changed_pct, \
+               100.0 * SUM(network_changed) / NULLIF(SUM(compared), 0) AS network_changed_pct, \
+               CAST(SUM(first_probes) AS DOUBLE) / {secs} AS probed_per_sec, \
+               CAST(SUM(skipped) AS DOUBLE) / {secs} AS skipped_per_sec \
+             FROM dns_minute WHERE {range} GROUP BY 1 ORDER BY 1"
+        ),
         "volume" => format!(
             "SELECT {t}, \
                CAST(SUM(CASE WHEN log_id <> {GLOBAL} THEN entries ELSE 0 END) AS DOUBLE) / {secs} AS raw_per_sec, \
@@ -237,5 +249,7 @@ pub async fn schema() -> Json<serde_json::Value> {
         t("daily_stages", daily_stages_schema()),
         t("daily_top", daily_top_schema()),
         t("daily_coverage", daily_coverage_schema()),
+        t("dns", dns_schema()),
+        t("dns_minute", dns_minute_schema()),
     ]))
 }
