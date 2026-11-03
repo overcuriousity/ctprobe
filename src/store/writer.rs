@@ -537,6 +537,11 @@ fn dns_minute_batch(rows: &[DnsMinuteRow]) -> Result<RecordBatch> {
             c(&|r| Some(r.skipped)),
             c(&|r| r.ttd_p50_ms),
             c(&|r| r.ttd_p90_ms),
+            c(&|r| Some(r.found_15m)),
+            c(&|r| Some(r.found_1h)),
+            c(&|r| Some(r.found_1d)),
+            c(&|r| Some(r.found_later)),
+            c(&|r| Some(r.queries)),
         ],
     )
 }

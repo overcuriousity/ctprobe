@@ -109,6 +109,7 @@ pub struct CertFilter {
     pub expires_from_ms: Option<i64>,
     pub expires_to_ms: Option<i64>,
     pub precert: Option<bool>,
+    pub dns: Option<DnsFilter>,
     pub sort: SortKey,
     /// Ascending when set; newest or largest first otherwise.
     pub asc: bool,
@@ -132,6 +133,41 @@ impl CertFilter {
             || self.expires_from_ms.is_some()
             || self.expires_to_ms.is_some()
             || self.precert.is_some()
+            || self.dns.is_some()
+    }
+}
+
+/// What DNS found for a certificate's names on their first probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DnsFilter {
+    /// At least one name had an address.
+    Address,
+    /// Its names were probed and none had an address.
+    NoAddress,
+    /// A name's IPv4 or IPv6 addresses differ from an earlier day's.
+    IpChanged,
+}
+
+impl DnsFilter {
+    pub fn parse(s: &str) -> Option<DnsFilter> {
+        Some(match s {
+            "address" => DnsFilter::Address,
+            "no_address" => DnsFilter::NoAddress,
+            "ip_changed" => DnsFilter::IpChanged,
+            _ => return None,
+        })
+    }
+
+    fn condition(self) -> String {
+        let first = "SELECT cert_hash FROM dns WHERE attempt = 0 AND kind = 'name'";
+        let resolved = format!("{first} AND status = 'resolved'");
+        match self {
+            DnsFilter::Address => format!("cert_hash IN ({resolved})"),
+            DnsFilter::NoAddress => format!("cert_hash IN ({first}) AND cert_hash NOT IN ({resolved})"),
+            DnsFilter::IpChanged => {
+                format!("cert_hash IN ({first} AND prev_days > 0 AND (v4_changed OR v6_changed))")
+            }
+        }
     }
 }
 
@@ -365,6 +401,9 @@ impl QueryEngine {
         }
         if let Some(p) = f.precert {
             conds.push(format!("is_precert = {p}"));
+        }
+        if let Some(d) = f.dns {
+            conds.push(d.condition());
         }
         conds.join(" AND ")
     }

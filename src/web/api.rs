@@ -1,7 +1,7 @@
 use super::{csv, AppState};
 use crate::fetch::{fetch_entry, FetchError};
 use crate::parse::extract;
-use crate::query::{quote, CertFilter, CertScope, Mode, QueryError, QueryResult, SortKey, MAX_OFFSET};
+use crate::query::{quote, CertFilter, CertScope, DnsFilter, Mode, QueryError, QueryResult, SortKey, MAX_OFFSET};
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -134,6 +134,7 @@ pub struct CertsQuery {
     expires_from: Option<String>,
     expires_to: Option<String>,
     precert: Option<bool>,
+    dns: Option<String>,
     sort: Option<String>,
     dir: Option<String>,
     offset: Option<usize>,
@@ -178,6 +179,13 @@ pub async fn certs(State(s): State<AppState>, Query(q): Query<CertsQuery>) -> Re
         Some("asc") => true,
         Some(_) => return error(StatusCode::BAD_REQUEST, "dir must be asc or desc"),
     };
+    let dns = match q.dns.as_deref().filter(|s| !s.is_empty()) {
+        None => None,
+        Some(s) => match DnsFilter::parse(s) {
+            Some(d) => Some(d),
+            None => return error(StatusCode::BAD_REQUEST, "dns must be address, no_address or ip_changed"),
+        },
+    };
     let offset = q.offset.unwrap_or(0);
     if offset > MAX_OFFSET {
         return error(StatusCode::BAD_REQUEST, format!("offset cannot pass {MAX_OFFSET}"));
@@ -212,6 +220,7 @@ pub async fn certs(State(s): State<AppState>, Query(q): Query<CertsQuery>) -> Re
         expires_from_ms,
         expires_to_ms,
         precert: q.precert,
+        dns,
         sort,
         asc,
         offset,
@@ -278,10 +287,115 @@ pub async fn domain(State(s): State<AppState>, Query(q): Query<DomainQuery>) -> 
     let days = parts.pop();
     let names = parts.pop();
     let issuers = parts.pop();
+    // DNS is optional here: a slow scan costs only this section.
+    let dns_names = s.engine.internal(
+        format!(
+            "SELECT name, last_value(status ORDER BY probed_at) AS status, \
+               last_value(v4 ORDER BY probed_at) AS v4, last_value(v6 ORDER BY probed_at) AS v6, \
+               CAST(MIN(CASE WHEN status = 'resolved' THEN probed_at END) AS BIGINT) AS first_address_ms, \
+               CAST(MAX(probed_at) AS BIGINT) AS last_probe_ms, \
+               CAST(SUM(CASE WHEN attempt = 0 AND prev_days > 0 AND (v4_changed OR v6_changed) \
+                 THEN 1 ELSE 0 END) AS BIGINT) AS ip_changes \
+             FROM dns WHERE reg_domain = {lit} AND kind = 'name' GROUP BY name ORDER BY name LIMIT 500"
+        ),
+        500,
+        None,
+        None,
+    );
+    let dns_changes = s.engine.internal(
+        format!(
+            "SELECT CAST(probed_at AS BIGINT) AS t, name, prev_days, prev_status, status, \
+               prev_v4, v4, prev_v6, v6 \
+             FROM dns WHERE reg_domain = {lit} AND attempt = 0 AND changed \
+             ORDER BY probed_at DESC LIMIT 100"
+        ),
+        100,
+        None,
+        None,
+    );
+    let (dns_names, dns_changes) = (dns_names.await, dns_changes.await);
+    let dns_error = dns_names.as_ref().err().or(dns_changes.as_ref().err()).map(|e| e.to_string());
     Json(json!({
         "domain": d, "hit": hit, "issuers": issuers, "names": names, "days": days, "similar": similar,
+        "dns_enabled": s.pipe.dns.is_some(),
+        "dns_names": dns_names.ok(), "dns_changes": dns_changes.ok(), "dns_error": dns_error,
     }))
     .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct CertDnsQuery {
+    hash: String,
+    /// When the certificate was logged, which bounds the days to read.
+    at: i64,
+    /// The certificate's names, for those probed for another certificate.
+    names: Option<String>,
+}
+
+const MAX_CERT_NAMES: usize = 200;
+
+/// DNS probes of one certificate's names: those made for it, and the latest
+/// answer for names that were already being probed for another certificate.
+pub async fn cert_dns(State(s): State<AppState>, Query(q): Query<CertDnsQuery>) -> Response {
+    let Ok(hash) = q.hash.parse::<u64>() else {
+        return error(StatusCode::BAD_REQUEST, "hash must be an unsigned 64-bit number");
+    };
+    const DAY: i64 = 86_400_000;
+    // Probes start when the certificate is seen, which follows its log
+    // timestamp within the log's merge delay, and run for 30 days. A
+    // timestamp in the future cannot be right, so it counts as now.
+    let at = q.at.min(chrono::Utc::now().timestamp_millis());
+    let (from, to) = (at - 2 * DAY, at + 31 * DAY);
+    let own = s.engine.internal(
+        format!(
+            "SELECT name, kind, attempt, status, v4, v6, cnames, CAST(probed_at AS BIGINT) AS probed_ms, \
+               CAST(cert_seen_at AS BIGINT) AS seen_ms, prev_days, prev_status, prev_v4, prev_v6, \
+               changed, v4_changed, v6_changed, network_changed \
+             FROM dns WHERE cert_hash = CAST('{hash}' AS BIGINT UNSIGNED) ORDER BY name, kind, attempt"
+        ),
+        5000,
+        Some(from),
+        Some(to),
+    );
+    let names: Vec<String> = q
+        .names
+        .unwrap_or_default()
+        .split(',')
+        .map(|n| n.trim().to_lowercase())
+        .filter(|n| !n.is_empty() && !n.starts_with("*."))
+        .take(MAX_CERT_NAMES)
+        .collect();
+    let mut domains: Vec<String> = names.iter().filter_map(|n| crate::names::registered_domain(n)).collect();
+    domains.sort();
+    domains.dedup();
+    let latest = if names.is_empty() || domains.is_empty() {
+        None
+    } else {
+        let list = |v: &[String]| v.iter().map(|x| quote(x)).collect::<Vec<_>>().join(", ");
+        // The registered domain first, so sorted and filtered files skip most rows.
+        Some(s.engine.internal(
+            format!(
+                "SELECT name, last_value(status ORDER BY probed_at) AS status, \
+                   last_value(v4 ORDER BY probed_at) AS v4, last_value(v6 ORDER BY probed_at) AS v6, \
+                   CAST(MAX(probed_at) AS BIGINT) AS probed_ms \
+                 FROM dns WHERE reg_domain IN ({}) AND name IN ({}) AND kind = 'name' GROUP BY name",
+                list(&domains),
+                list(&names)
+            ),
+            MAX_CERT_NAMES,
+            Some(from),
+            Some(to),
+        ))
+    };
+    let own = match own.await {
+        Ok(r) => r,
+        Err(e) => return query_error(e),
+    };
+    let latest = match latest {
+        Some(f) => f.await.ok(),
+        None => None,
+    };
+    Json(json!({ "enabled": s.pipe.dns.is_some(), "probes": own, "latest": latest })).into_response()
 }
 
 pub async fn cert(State(s): State<AppState>, Path((log, index)): Path<(u16, u64)>) -> Response {
@@ -303,6 +417,8 @@ pub async fn cert(State(s): State<AppState>, Path((log, index)): Path<(u16, u64)
     Json(json!({
         "log": info.name,
         "index": index,
+        // As a string: JavaScript numbers cannot hold every 64-bit value.
+        "cert_hash": crate::tracker::cert_hash(&parsed).to_string(),
         "is_precert": entry.is_precert,
         "timestamp_ms": entry.timestamp_ms,
         "parsed": parsed,

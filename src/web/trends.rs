@@ -15,7 +15,7 @@ use serde_json::json;
 pub const METRICS: &[&str] = &[
     "volume", "stages", "renewals", "issuers", "tlds", "keys", "validity", "san_dist", "der_size",
     "peaks", "lag", "concentration", "coverage", "state_growth", "catchup", "cost", "resources",
-    "settling", "quality", "sizing", "dns",
+    "settling", "quality", "sizing", "dns", "dns_changes", "dns_ttd", "dns_sizing",
 ];
 
 const ROWS: usize = 20_000;
@@ -62,14 +62,34 @@ pub fn trend_query(metric: &str, from: i64, to: i64, bucket: &str, today: i64, h
                100.0 * SUM(first_resolved) / NULLIF(SUM(first_probes), 0) AS resolved_pct, \
                100.0 * SUM(first_v4) / NULLIF(SUM(first_probes), 0) AS v4_pct, \
                100.0 * SUM(first_v6) / NULLIF(SUM(first_probes), 0) AS v6_pct, \
-               100.0 * SUM(first_nxdomain) / NULLIF(SUM(first_probes), 0) AS nxdomain_pct, \
-               100.0 * SUM(changed) / NULLIF(SUM(compared), 0) AS changed_pct, \
+               100.0 * SUM(first_nxdomain) / NULLIF(SUM(first_probes), 0) AS nxdomain_pct \
+             FROM dns_minute WHERE {range} GROUP BY 1 ORDER BY 1"
+        ),
+        "dns_changes" => format!(
+            "SELECT {t}, \
                100.0 * SUM(v4_changed) / NULLIF(SUM(v4_compared), 0) AS v4_changed_pct, \
                100.0 * SUM(v6_changed) / NULLIF(SUM(v6_compared), 0) AS v6_changed_pct, \
                100.0 * SUM(network_changed) / NULLIF(SUM(compared), 0) AS network_changed_pct, \
-               CAST(SUM(first_probes) AS DOUBLE) / {secs} AS probed_per_sec, \
-               CAST(SUM(skipped) AS DOUBLE) / {secs} AS skipped_per_sec \
+               100.0 * SUM(changed) / NULLIF(SUM(compared), 0) AS changed_pct \
              FROM dns_minute WHERE {range} GROUP BY 1 ORDER BY 1"
+        ),
+        // Cumulative shares of names found on a later probe.
+        "dns_ttd" => format!(
+            "SELECT {t}, \
+               100.0 * SUM(found_15m) / NULLIF(SUM(found_15m + found_1h + found_1d + found_later), 0) AS within_15_min_pct, \
+               100.0 * SUM(found_15m + found_1h) / NULLIF(SUM(found_15m + found_1h + found_1d + found_later), 0) AS within_1_h_pct, \
+               100.0 * SUM(found_15m + found_1h + found_1d) / NULLIF(SUM(found_15m + found_1h + found_1d + found_later), 0) AS within_1_day_pct \
+             FROM dns_minute WHERE {range} AND found_15m IS NOT NULL GROUP BY 1 \
+             HAVING SUM(found_15m + found_1h + found_1d + found_later) > 0 ORDER BY 1"
+        ),
+        "dns_sizing" => format!(
+            "SELECT COUNT(*) AS minutes, \
+               approx_percentile_cont(queries / 60.0, 0.5) AS queries_p50, \
+               approx_percentile_cont(queries / 60.0, 0.99) AS queries_p99, \
+               approx_percentile_cont(first_probes / 60.0, 0.5) AS names_p50, \
+               100.0 * SUM(first_resolved) / NULLIF(SUM(first_probes), 0) AS resolved_pct, \
+               100.0 * SUM(never) / NULLIF(SUM(resolved_later + never), 0) AS never_pct \
+             FROM dns_minute WHERE {range} AND queries IS NOT NULL"
         ),
         "volume" => format!(
             "SELECT {t}, \

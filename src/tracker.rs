@@ -98,6 +98,13 @@ fn replay_wal(path: &Path, tables: &mut [Table; 3], committed: u64) -> Result<u6
     Ok(good)
 }
 
+/// Identifies a certificate across logs and its precertificate: issuer and serial.
+pub fn cert_hash(p: &ParsedCert) -> u64 {
+    let mut k = p.issuer_der.clone();
+    k.extend_from_slice(p.serial_hex.as_bytes());
+    xxh3_64(&k)
+}
+
 impl Tracker {
     /// Loads the snapshot and replays WAL frames up to `committed_epoch`.
     /// Later frames belong to a commit that never completed and are dropped.
@@ -203,11 +210,7 @@ impl Tracker {
 
     /// Records one entry. `today` is days since the Unix epoch.
     pub fn observe(&mut self, m: EntryMeta, p: &ParsedCert, today: u16) -> Observation {
-        let cert_hash = {
-            let mut k = p.issuer_der.clone();
-            k.extend_from_slice(p.serial_hex.as_bytes());
-            xxh3_64(&k)
-        };
+        let cert_hash = cert_hash(p);
         let sighting = Sighting { cert_hash, log: m.log, seen_at_ms: m.seen_at_ms };
         if let Some(day) = self.get(DEDUP, cert_hash) {
             if today.saturating_sub(day) <= DEDUP_DAYS {

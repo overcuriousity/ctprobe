@@ -2,7 +2,6 @@
 const pct = (n, d) => (d ? (100 * n / d).toFixed(1) + '%' : '–');
 // Schedule steps as written in the config: minutes, then hours, then days.
 const after = (secs) => (secs === 0 ? 'At sighting' : '+' + (secs < 3600 ? secs / 60 + ' min' : secs < 172800 ? secs / 3600 + ' h' : secs / 86400 + ' d'));
-const tile = (k, v, d) => h('div', { class: 'card tile' }, h('div', { class: 'v' }, v), h('div', { class: 'k' }, k), d ? h('div', { class: 'd' }, d) : null);
 const NUMS = (n) => ({ num: n });
 
 function outcomeRows(cols) {
@@ -62,47 +61,27 @@ function flowCard(r) {
 
 function resolverTable(x) {
   const lat = (k) => (x.latency ? fmtMs(x.latency[k]) : '–');
-  const cols = ['Resolver', 'Queries', 'Answers', 'NXDOMAIN', 'Timeouts', 'Errors', 'Latency p50', 'Latency p99'];
-  return table(cols, [[x.addr, fmt(x.queries), pct(x.answers, x.queries), pct(x.nxdomain, x.queries), pct(x.timeouts, x.queries), pct(x.errors, x.queries), lat('p50_ms'), lat('p99_ms')]], NUMS(cols.slice(1)));
+  const cols = ['Resolver', 'Queries', 'Answers', 'NXDOMAIN', 'Timeouts', 'SERVFAIL', 'Refused', 'Unreachable', 'Latency p50', 'Latency p99'];
+  return table(cols, [[x.addr, fmt(x.queries), pct(x.answers, x.queries), pct(x.nxdomain, x.queries), pct(x.timeouts, x.queries),
+    pct(x.servfail, x.queries), pct(x.refused, x.queries), pct(x.unreachable, x.queries), lat('p50_ms'), lat('p99_ms')]], NUMS(cols.slice(1)));
 }
 
 async function load() {
   const r = await getJson('/api/dns');
   if (!r.enabled) {
     $('#lead').textContent = 'DNS probing is off. Set a resolver under [dns] in the configuration to turn it on.';
-    document.querySelectorAll('main .card, main .tiles').forEach((e) => { e.hidden = true; });
+    document.querySelectorAll('main .card').forEach((e) => { e.hidden = true; });
     return;
   }
-  const g = r.names, f = g.first, e = g.earlier_day;
-  $('#lead').textContent = 'Since ' + new Date(r.since_ms).toISOString().slice(0, 16).replace('T', ' ') + ' UTC, through ' + r.resolver.addr + '.';
-  clear($('#tiles')).append(
-    tile('Probes per second', fmt(r.probes_per_sec)),
-    tile('Address at first probe', pct(f.resolved, f.probes), fmt(f.probes) + ' names'),
-    tile('IPv4', pct(f.v4, f.probes)),
-    tile('IPv6', pct(f.v6, f.probes)),
-    tile('Found later', fmt(g.resolved_later), g.time_to_dns ? 'median ' + fmtMs(g.time_to_dns.p50_ms) : null),
-    tile('IPv4 changed since an earlier day', pct(e.v4_changed, e.v4_compared), fmt(e.v4_compared) + ' compared'),
-    tile('IPv6 changed since an earlier day', pct(e.v6_changed, e.v6_compared), fmt(e.v6_compared) + ' compared'),
-  );
-  clear($('#first')).append(outcomeRows([['All names', f], ['Never-seen names', g.first_new], ['Names seen before', g.first_renewed]]));
+  const g = r.names;
+  $('#lead').textContent = 'Since ' + new Date(r.since_ms).toISOString().slice(0, 16).replace('T', ' ') + ' UTC, through ' + r.resolver.addr
+    + '. Shares over time are on the Trends page, and each domain and certificate shows its own answers.';
+  clear($('#first')).append(outcomeRows([['All names', g.first], ['Never-seen names', g.first_new], ['Names seen before', g.first_renewed]]));
   clear($('#later')).append(...laterCard(g, r.schedule_secs, r.waiting));
   clear($('#changes')).append(changesTable(g));
   clear($('#wild')).append(outcomeRows([['Wildcard record', r.wildcards.first], ['Covered name', r.bases.first]]));
   clear($('#flow')).append(...flowCard(r));
   clear($('#resolver')).append(resolverTable(r.resolver));
-}
-
-async function loadTrend() {
-  const [hours, bucket] = $('#range').value.split(':');
-  const q = 'hours=' + hours + '&bucket=' + bucket;
-  $('#trend-csv').href = '/api/trends/dns?format=csv&' + q;
-  const t = await getJson('/api/trends/dns?' + q);
-  const host = clear($('#trend'));
-  if (!t.rows.length) { host.append(h('div', { class: 'empty' }, 'No data in this range yet')); return; }
-  const keep = ['resolved_pct', 'v4_pct', 'v6_pct', 'nxdomain_pct', 'v4_changed_pct', 'v6_changed_pct', 'network_changed_pct'];
-  const idx = keep.map((c) => t.columns.indexOf(c));
-  lineChart(host, { data: [t.rows.map((x) => x[0]), ...idx.map((i) => t.rows.map((x) => x[i] ?? null))],
-    series: keep.map((c) => ({ label: c.replace(/_pct$/, '').replace(/_/g, ' ') })), format: (v) => v.toFixed(1) + '%', points: t.rows.length < 3, legend: true, height: 260 });
 }
 
 $('#first-h').append(info('dnsfirst'));
@@ -111,8 +90,5 @@ $('#changes-h').append(info('dnschanges'));
 $('#wild-h').append(info('dnswild'));
 $('#flow-h').append(info('dnsflow'));
 function fail(err) { $('#lead').textContent = err.message; $('#lead').className = 'err'; }
-$('#range').addEventListener('change', () => loadTrend().catch(fail));
 load().catch(fail);
-loadTrend().catch(() => {});
 setInterval(() => load().catch(() => {}), 5000);
-setInterval(() => loadTrend().catch(() => {}), 60000);
