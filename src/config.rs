@@ -25,44 +25,45 @@ pub struct Config {
     pub dns: DnsConfig,
 }
 
-/// DNS probing of certificate names. Off while `resolvers` is empty.
+/// DNS probing of certificate names. Off while no resolver is set.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DnsConfig {
-    pub resolvers: Vec<SocketAddr>,
-    /// Resolvers that must report the same outcome for it to count.
-    pub quorum: usize,
-    /// Queries per second sent to each resolver; every probe sends two (A, AAAA).
+    /// A recursive resolver of our own, normally the local Unbound.
+    pub resolver: Option<SocketAddr>,
+    /// Queries per second sent to the resolver; every probe sends two (A, AAAA).
     pub max_qps: u32,
+    /// Percent of names probed, chosen by a hash of the name so the same names
+    /// are probed on every certificate.
+    pub sample_pct: f64,
     /// Memory cap for the last answer per name, used to detect changes.
     pub state_max_bytes: u64,
 }
 
 impl Default for DnsConfig {
     fn default() -> Self {
-        DnsConfig { resolvers: Vec::new(), quorum: 1, max_qps: DEFAULT_DNS_QPS, state_max_bytes: DEFAULT_DNS_STATE }
+        DnsConfig { resolver: None, max_qps: DEFAULT_DNS_QPS, sample_pct: 100.0, state_max_bytes: DEFAULT_DNS_STATE }
     }
 }
 
 impl DnsConfig {
     pub fn enabled(&self) -> bool {
-        !self.resolvers.is_empty()
+        self.resolver.is_some()
     }
 }
 
-const DEFAULT_DNS_QPS: u32 = 500;
-const DEFAULT_DNS_STATE: u64 = 256 << 20;
+const DEFAULT_DNS_QPS: u32 = 2000;
+const DEFAULT_DNS_STATE: u64 = 2 << 30;
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct RawDns {
-    #[serde(default)]
-    resolvers: Vec<String>,
-    quorum: Option<usize>,
+    resolver: Option<String>,
     max_qps: Option<u32>,
+    sample_pct: Option<f64>,
     state_max: Option<String>,
 }
 
-/// `1.2.3.4`, `1.2.3.4:5353`, `::1` or `[::1]:5353`; port 53 when absent.
+/// `1.2.3.4`, `1.2.3.4:5335`, `::1` or `[::1]:5335`; port 53 when absent.
 fn parse_resolver(s: &str) -> Result<SocketAddr> {
     let s = s.trim();
     if let Ok(a) = s.parse::<SocketAddr>() {
@@ -74,21 +75,20 @@ fn parse_resolver(s: &str) -> Result<SocketAddr> {
 
 impl RawDns {
     fn build(self) -> Result<DnsConfig> {
-        let resolvers = self.resolvers.iter().map(|r| parse_resolver(r)).collect::<Result<Vec<_>>>()?;
-        let n = resolvers.len();
-        let quorum = self.quorum.unwrap_or(n / 2 + 1);
-        if n > 0 && !(1..=n).contains(&quorum) {
-            bail!("dns.quorum {quorum} must be between 1 and the number of resolvers ({n})");
-        }
+        let resolver = self.resolver.as_deref().map(parse_resolver).transpose()?;
         let max_qps = self.max_qps.unwrap_or(DEFAULT_DNS_QPS);
         if max_qps < 2 {
             bail!("dns.max_qps must be at least 2");
+        }
+        let sample_pct = self.sample_pct.unwrap_or(100.0);
+        if !(sample_pct > 0.0 && sample_pct <= 100.0) {
+            bail!("dns.sample_pct {sample_pct} must be above 0 and at most 100");
         }
         let state_max_bytes = match &self.state_max {
             Some(s) => parse_size(s)?,
             None => DEFAULT_DNS_STATE,
         };
-        Ok(DnsConfig { resolvers, quorum: quorum.max(1), max_qps, state_max_bytes })
+        Ok(DnsConfig { resolver, max_qps, sample_pct, state_max_bytes })
     }
 }
 
@@ -162,7 +162,8 @@ mod tests {
         assert_eq!(c.extra_log_lists, [DEFAULT_APPLE_LIST]);
         assert!(!c.include_test_logs);
         assert_eq!(c.coverage_target, 95.0);
-        assert!(!c.dns.enabled());
+        assert_eq!(c.dns.resolver.unwrap().to_string(), "127.0.0.1:5335");
+        assert_eq!((c.dns.max_qps, c.dns.sample_pct, c.dns.state_max_bytes), (2000, 100.0, 2 << 30));
     }
 
     #[test]
@@ -170,18 +171,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("c.toml");
         let base = "bind = \"0.0.0.0:1\"\ndata_dir = \"d\"\ndisk_budget = \"1GiB\"\ntracker_max = \"1GiB\"\n";
-        let dns = "[dns]\nresolvers = [\"127.0.0.1\", \"[::1]:5353\", \"9.9.9.9:53\"]\nmax_qps = 100\nstate_max = \"64MiB\"\n";
-        std::fs::write(&p, format!("{base}{dns}")).unwrap();
-        let c = Config::load(&p).unwrap().dns;
-        assert_eq!(c.resolvers[0].to_string(), "127.0.0.1:53");
-        assert_eq!(c.resolvers[1].to_string(), "[::1]:5353");
-        assert_eq!(c.quorum, 2, "majority by default");
-        assert_eq!(c.max_qps, 100);
-        assert_eq!(c.state_max_bytes, 64 << 20);
-        std::fs::write(&p, format!("{base}[dns]\nresolvers = [\"127.0.0.1\"]\nquorum = 2\n")).unwrap();
-        assert!(Config::load(&p).is_err());
-        std::fs::write(&p, format!("{base}[dns]\nresolvers = [\"not an ip\"]\n")).unwrap();
-        assert!(Config::load(&p).is_err());
+        let load = |dns: &str| {
+            std::fs::write(&p, format!("{base}{dns}")).unwrap();
+            Config::load(&p).map(|c| c.dns)
+        };
+        let c = load("[dns]\nresolver = \"127.0.0.1:5335\"\nmax_qps = 100\nsample_pct = 25\nstate_max = \"64MiB\"\n").unwrap();
+        assert_eq!(c.resolver.unwrap().to_string(), "127.0.0.1:5335");
+        assert_eq!((c.max_qps, c.sample_pct, c.state_max_bytes), (100, 25.0, 64 << 20));
+        assert_eq!(load("[dns]\nresolver = \"::1\"\n").unwrap().resolver.unwrap().to_string(), "[::1]:53");
+        assert_eq!(load("[dns]\n").unwrap(), DnsConfig::default());
+        assert!(load("[dns]\nresolver = \"not an ip\"\n").is_err());
+        assert!(load("[dns]\nresolver = \"::1\"\nsample_pct = 0\n").is_err());
     }
 
     #[test]

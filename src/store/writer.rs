@@ -430,9 +430,9 @@ fn domains_batch(rows: &[(String, DomainDelta)]) -> Result<RecordBatch> {
 
 
 fn dns_batch(rows: &[DnsRow]) -> Result<RecordBatch> {
-    let ts = |f: &dyn Fn(&DnsRow) -> i64| -> ArrayRef {
+    let ts = |f: &dyn Fn(&DnsRow) -> Option<i64>| -> ArrayRef {
         let mut b = TimestampMillisecondBuilder::with_capacity(rows.len());
-        rows.iter().for_each(|r| b.append_value(f(r)));
+        rows.iter().for_each(|r| b.append_option(f(r)));
         Arc::new(b.finish())
     };
     let s = |f: &dyn Fn(&DnsRow) -> Option<&str>| -> ArrayRef {
@@ -450,16 +450,24 @@ fn dns_batch(rows: &[DnsRow]) -> Result<RecordBatch> {
         rows.iter().for_each(|r| b.append_option(f(r)));
         Arc::new(b.finish())
     };
-    let listc = |f: &dyn Fn(&DnsRow) -> Vec<String>| -> ArrayRef {
+    let listc = |f: &dyn Fn(&DnsRow) -> Option<Vec<String>>| -> ArrayRef {
         let mut b = ListBuilder::new(StringBuilder::new());
         for r in rows {
-            for v in f(r) {
-                b.values().append_value(v);
+            match f(r) {
+                Some(v) => {
+                    for x in v {
+                        b.values().append_value(x);
+                    }
+                    b.append(true);
+                }
+                None => b.append(false),
             }
-            b.append(true);
         }
         Arc::new(b.finish())
     };
+    let strs = |v: Vec<std::net::IpAddr>| v.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+    let prev = |r: &DnsRow| r.prev.as_ref().map(|p| p.0);
+    let change = |r: &DnsRow| r.prev.as_ref().map(|p| p.1);
     let mut hash = UInt64Builder::with_capacity(rows.len());
     rows.iter().for_each(|r| hash.append_value(r.cert_hash));
     let mut ttl = Int64Builder::with_capacity(rows.len());
@@ -467,23 +475,32 @@ fn dns_batch(rows: &[DnsRow]) -> Result<RecordBatch> {
     batch(
         dns_schema(),
         vec![
-            ts(&|r| r.probed_at_ms),
+            ts(&|r| Some(r.probed_at_ms)),
             s(&|r| Some(&r.name)),
+            s(&|r| Some(r.kind.as_str())),
             s(&|r| r.reg_domain.as_deref()),
             Arc::new(hash.finish()),
-            ts(&|r| r.cert_seen_at_ms),
+            ts(&|r| Some(r.cert_seen_at_ms)),
             i32c(&|r| Some(r.attempt as i32)),
             s(&|r| Some(r.renewal)),
             s(&|r| Some(r.lookup.status.as_str())),
-            listc(&|r| r.lookup.v4.iter().map(|a| a.to_string()).collect()),
-            listc(&|r| r.lookup.v6.iter().map(|a| a.to_string()).collect()),
-            listc(&|r| r.lookup.cnames.clone()),
+            listc(&|r| Some(r.lookup.v4.iter().map(|a| a.to_string()).collect())),
+            listc(&|r| Some(r.lookup.v6.iter().map(|a| a.to_string()).collect())),
+            listc(&|r| Some(r.lookup.cnames.clone())),
             Arc::new(ttl.finish()),
             i32c(&|r| Some(r.latency_ms.min(i32::MAX as u32) as i32)),
-            i32c(&|r| Some(r.agree as i32)),
-            boolc(&|r| r.changed),
-            boolc(&|r| r.network_changed),
-            i32c(&|r| r.prev_days.map(i32::from)),
+            ts(&|r| r.last_miss_ms),
+            i32c(&|r| change(r).map(|c| c.days as i32)),
+            s(&|r| prev(r).and_then(|p| p.status()).map(|s| s.as_str())),
+            listc(&|r| prev(r).map(|p| strs(p.v4().into_iter().map(Into::into).collect()))),
+            listc(&|r| prev(r).map(|p| strs(p.v6().into_iter().map(Into::into).collect()))),
+            boolc(&|r| prev(r).map(|p| p.complete())),
+            boolc(&|r| change(r).map(|c| c.changed)),
+            boolc(&|r| change(r).map(|c| c.status_changed)),
+            boolc(&|r| change(r).map(|c| c.v4_changed)),
+            boolc(&|r| change(r).map(|c| c.v6_changed)),
+            boolc(&|r| change(r).map(|c| c.cname_changed)),
+            boolc(&|r| change(r).map(|c| c.network_changed)),
         ],
     )
 }
@@ -512,6 +529,10 @@ fn dns_minute_batch(rows: &[DnsMinuteRow]) -> Result<RecordBatch> {
             c(&|r| Some(r.never)),
             c(&|r| Some(r.compared)),
             c(&|r| Some(r.changed)),
+            c(&|r| Some(r.v4_compared)),
+            c(&|r| Some(r.v4_changed)),
+            c(&|r| Some(r.v6_compared)),
+            c(&|r| Some(r.v6_changed)),
             c(&|r| Some(r.network_changed)),
             c(&|r| Some(r.skipped)),
             c(&|r| r.ttd_p50_ms),

@@ -1,7 +1,8 @@
 use ctprobe::config::DnsConfig;
 use ctprobe::dns::client::{query, query_name, Reply};
 use ctprobe::dns::mock::{MockAnswer, MockDns};
-use ctprobe::dns::outcome::{Fingerprint, Status};
+use ctprobe::dns::outcome::{Lookup, Status};
+use ctprobe::dns::queue::Kind;
 use ctprobe::dns::state::{Last, LastAnswers};
 use ctprobe::dns::{self, DnsLink, DnsOpts, DnsOut, DnsReport, DnsRow, STATE_FILE};
 use ctprobe::types::{CertRow, ParsedCert, RenewalClass};
@@ -14,8 +15,10 @@ use tokio::sync::watch;
 const T: Duration = Duration::from_millis(300);
 
 fn cert(hash: u64, names: &[&str], renewal: RenewalClass) -> CertRow {
+    let mut names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+    names.sort();
     CertRow {
-        parsed: ParsedCert { names: names.iter().map(|n| n.to_string()).collect(), ..Default::default() },
+        parsed: ParsedCert { names, ..Default::default() },
         reg_domains: vec![],
         primary_domain: None,
         is_wildcard: false,
@@ -34,8 +37,8 @@ fn cert(hash: u64, names: &[&str], renewal: RenewalClass) -> CertRow {
     }
 }
 
-fn cfg(resolvers: Vec<SocketAddr>, quorum: usize) -> DnsConfig {
-    DnsConfig { resolvers, quorum, max_qps: 10_000, state_max_bytes: 1 << 20 }
+fn cfg(resolver: SocketAddr) -> DnsConfig {
+    DnsConfig { resolver: Some(resolver), max_qps: 10_000, sample_pct: 100.0, state_max_bytes: 1 << 20 }
 }
 
 fn opts(schedule_ms: &[u64]) -> DnsOpts {
@@ -72,7 +75,7 @@ impl Run {
         }
     }
 
-    /// Waits until `pred` holds for the published report.
+    /// Waits until `pred` holds for the published report and the rows so far.
     async fn until(&mut self, what: &str, pred: impl Fn(&DnsReport, &[DnsRow]) -> bool) -> DnsReport {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
@@ -84,6 +87,10 @@ impl Run {
             assert!(Instant::now() < deadline, "timed out waiting for {what}: {r:#?}");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+
+    fn row(&self, name: &str, attempt: u8) -> &DnsRow {
+        self.rows.iter().find(|r| r.name == name && r.attempt == attempt).unwrap()
     }
 
     fn stop(self) {
@@ -127,85 +134,109 @@ async fn probes_names_and_retries_until_they_resolve() {
     m.set("a.example.com", MockAnswer::addrs(&["192.0.2.1", "2001:db8::1"]));
     m.set("v4.example.com", MockAnswer::addrs(&["192.0.2.2"]));
     let dir = tempfile::tempdir().unwrap();
-    let mut run = Run::start(cfg(vec![m.addr()], 1), opts(&[0, 300, 900, 1500]), dir.path());
-    run.link.submit(&cert(1, &["*.example.com", "a.example.com", "late.example.com", "v4.example.com"], RenewalClass::New));
-    let r = run.until("first probes", |r, _| r.first.probes == 3).await;
-    assert_eq!((r.wildcards, r.names), (1, 3));
-    assert_eq!((r.first.resolved, r.first.v4, r.first.v6, r.first.both, r.first.nxdomain), (2, 2, 1, 1, 1));
-    assert_eq!(r.first_new.probes, 3);
+    let mut run = Run::start(cfg(m.addr()), opts(&[0, 1000, 2000, 3000]), dir.path());
+    run.link.submit(&cert(1, &["a.example.com", "late.example.com", "v4.example.com"], RenewalClass::New));
+    let r = run.until("first probes", |r, _| r.names.first.probes == 3).await;
+    let f = &r.names.first;
+    assert_eq!((f.resolved, f.v4, f.v6, f.both, f.nxdomain), (2, 2, 1, 1, 1));
+    assert_eq!(r.names.first_new.probes, 3);
     // The missing name appears between the second and third probe.
     run.until("second probe", |_, rows| rows.iter().any(|r| r.name == "late.example.com" && r.attempt == 1)).await;
     m.set("late.example.com", MockAnswer::addrs(&["192.0.2.9"]));
-    let r = run.until("late name", |r, _| r.resolved_later == 1).await;
-    assert_eq!(r.later_by_attempt, vec![0, 0, 1, 0]);
-    let ttd = r.time_to_dns.clone().unwrap();
-    assert!(ttd.p50_ms >= 800.0 && ttd.p50_ms < 3000.0, "{ttd:?}");
-    let late: Vec<_> = run.rows.iter().filter(|r| r.name == "late.example.com").collect();
-    assert_eq!(late.iter().map(|r| (r.attempt, r.lookup.status)).collect::<Vec<_>>(),
-        vec![(0, Status::NxDomain), (1, Status::NxDomain), (2, Status::Resolved)]);
-    assert!(late.iter().all(|r| r.cert_hash == 1 && r.renewal == "new"));
+    let r = run.until("late name", |r, _| r.names.resolved_later == 1).await;
+    assert_eq!(r.names.later_by_attempt, vec![0, 0, 1, 0]);
+    let (hi, lo) = (r.names.time_to_dns.clone().unwrap(), r.names.time_to_dns_lower.clone().unwrap());
+    assert!(lo.p50_ms >= 1000.0 && hi.p50_ms >= 2000.0 && hi.p50_ms < 4000.0, "{lo:?} {hi:?}");
+    let late = run.row("late.example.com", 2);
+    assert_eq!(late.lookup.status, Status::Resolved);
+    assert_eq!(late.last_miss_ms, Some(run.row("late.example.com", 1).probed_at_ms));
+    assert!(run.rows.iter().all(|r| r.cert_hash == 1 && r.renewal == "new" && r.kind == Kind::Name));
     // A name still pending is not probed twice for another certificate.
-    m.set("never.example.com", MockAnswer::NxDomain);
     run.link.submit(&cert(2, &["never.example.com"], RenewalClass::New));
     run.link.submit(&cert(3, &["never.example.com"], RenewalClass::Name));
-    let r = run.until("never", |r, _| r.never == 1).await;
+    let r = run.until("never", |r, _| r.names.never == 1).await;
     assert_eq!(r.already_pending, 1);
-    assert_eq!(r.resolvers[0].queries, 2 * r.probes);
+    assert_eq!(r.resolver.queries, 2 * r.probes);
+    assert!(r.retry_late.is_some());
     assert!(run.minutes > 0, "minute rows count first probes");
     run.stop();
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn compares_with_last_answer_and_keeps_it_across_restarts() {
+async fn wildcards_are_asked_as_written_and_for_the_name_they_cover() {
     let m = MockDns::start().await;
-    m.set("moved.example.com", MockAnswer::addrs(&["192.0.2.1"]));
+    m.set("*.example.com", MockAnswer::addrs(&["192.0.2.1"]));
+    m.set("example.org", MockAnswer::addrs(&["192.0.2.2"]));
+    let dir = tempfile::tempdir().unwrap();
+    let mut run = Run::start(cfg(m.addr()), opts(&[0]), dir.path());
+    run.link.submit(&cert(1, &["*.example.com"], RenewalClass::New));
+    // The covered name is listed, so it is probed once, as a name.
+    run.link.submit(&cert(2, &["*.example.org", "example.org"], RenewalClass::New));
+    let r = run.until("probes", |r, _| r.probes == 4).await;
+    assert_eq!((r.wildcards.first.probes, r.wildcards.first.resolved), (2, 1));
+    assert_eq!((r.bases.first.probes, r.bases.first.nxdomain), (1, 1));
+    assert_eq!((r.names.first.probes, r.names.first.resolved), (1, 1));
+    assert_eq!(run.row("example.com", 0).kind, Kind::Base);
+    assert_eq!(run.row("*.example.com", 0).kind, Kind::Wildcard);
+    run.stop();
+}
+
+fn resolved(v4: &[&str]) -> Lookup {
+    Lookup { status: Status::Resolved, v4: v4.iter().map(|a| a.parse().unwrap()).collect(), v6: vec![], cnames: vec![], ttl: None }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reports_ip_changes_and_keeps_answers_across_restarts() {
+    let m = MockDns::start().await;
+    m.set("moved.example.com", MockAnswer::addrs(&["203.0.113.5"]));
     m.set("same.example.com", MockAnswer::addrs(&["192.0.2.5"]));
     let dir = tempfile::tempdir().unwrap();
     let today = (chrono::Utc::now().timestamp_millis() / 86_400_000) as u16;
     // Thirty days ago, before a renewal, `moved` pointed elsewhere.
     let mut last = LastAnswers::open(&dir.path().join(STATE_FILE), 1 << 20);
     let h = xxhash_rust::xxh3::xxh3_64(b"moved.example.com");
-    last.put(h, Last { fp: Fingerprint { exact: 1, network: 1 }, day: today - 30 });
+    last.put(h, Last::of(&resolved(&["192.0.2.1", "192.0.2.2"]), today - 30));
     last.save().unwrap();
 
-    let mut run = Run::start(cfg(vec![m.addr()], 1), opts(&[0]), dir.path());
+    let mut run = Run::start(cfg(m.addr()), opts(&[0]), dir.path());
     run.link.submit(&cert(1, &["moved.example.com", "same.example.com"], RenewalClass::Name));
-    let r = run.until("first", |r, _| r.first.probes == 2).await;
-    assert_eq!((r.earlier_day.compared, r.earlier_day.changed, r.earlier_day.network_changed), (1, 1, 1));
-    let moved = run.rows.iter().find(|r| r.name == "moved.example.com").unwrap();
-    assert_eq!((moved.changed, moved.prev_days), (Some(true), Some(30)));
-    assert_eq!(run.rows.iter().find(|r| r.name == "same.example.com").unwrap().changed, None);
-    assert_eq!(r.first_renewed.probes, 2);
+    let r = run.until("first", |r, _| r.names.first.probes == 2).await;
+    let e = &r.names.earlier_day;
+    assert_eq!((e.compared, e.changed, e.v4_compared, e.v4_changed, e.v4_replaced, e.v4_replaced_known), (1, 1, 1, 1, 1, 1));
+    let moved = run.row("moved.example.com", 0);
+    let (old, change) = moved.prev.unwrap();
+    assert_eq!((change.days, change.v4_changed), (30, true));
+    assert_eq!(old.v4(), vec!["192.0.2.1".parse::<std::net::Ipv4Addr>().unwrap(), "192.0.2.2".parse().unwrap()]);
+    assert!(run.row("same.example.com", 0).prev.is_none());
+    assert_eq!(r.names.first_renewed.probes, 2);
     run.stop();
 
-    // After a restart the answers are still known; only `same` changed, and
-    // only its addresses within the same /24.
+    // After a restart the answers are still known. `same` moved within its /24.
     m.set("same.example.com", MockAnswer::addrs(&["192.0.2.6"]));
-    let mut run = Run::start(cfg(vec![m.addr()], 1), opts(&[0]), dir.path());
+    let mut run = Run::start(cfg(m.addr()), opts(&[0]), dir.path());
     run.link.submit(&cert(2, &["moved.example.com", "same.example.com"], RenewalClass::Exact));
-    let r = run.until("second", |r, _| r.first.probes == 2).await;
-    assert_eq!((r.same_day.compared, r.same_day.changed, r.same_day.network_changed), (2, 1, 0));
-    let same = run.rows.iter().find(|r| r.name == "same.example.com").unwrap();
-    assert_eq!((same.changed, same.network_changed, same.prev_days), (Some(true), Some(false), Some(0)));
+    let r = run.until("second", |r, _| r.names.first.probes == 2).await;
+    let s = &r.names.same_day;
+    assert_eq!((s.compared, s.changed, s.v4_changed, s.v4_replaced, s.network_changed), (2, 1, 1, 1, 0));
+    let (_, change) = run.row("same.example.com", 0).prev.unwrap();
+    assert!(change.v4_changed && !change.network_changed && change.days == 0);
     run.stop();
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn quorum_decides_and_counts_disagreement() {
-    let good = MockDns::start().await;
-    let good2 = MockDns::start().await;
-    let filtering = MockDns::start().await;
-    for m in [&good, &good2] {
-        m.set("blocked.example.com", MockAnswer::addrs(&["192.0.2.1"]));
-    }
-    filtering.set("blocked.example.com", MockAnswer::NxDomain);
+async fn waiting_names_survive_a_restart() {
+    let m = MockDns::start().await;
     let dir = tempfile::tempdir().unwrap();
-    let mut run = Run::start(cfg(vec![good.addr(), good2.addr(), filtering.addr()], 2), opts(&[0]), dir.path());
-    run.link.submit(&cert(1, &["blocked.example.com"], RenewalClass::New));
-    let r = run.until("probe", |r, _| r.first.probes == 1).await;
-    assert_eq!(r.first.resolved, 1);
-    assert_eq!(r.resolvers.iter().map(|x| x.disagreed).collect::<Vec<_>>(), vec![0, 0, 1]);
-    assert_eq!(run.rows[0].agree, 2);
+    let mut run = Run::start(cfg(m.addr()), opts(&[0, 1500]), dir.path());
+    run.link.submit(&cert(1, &["soon.example.com"], RenewalClass::New));
+    run.until("first probe", |r, _| r.names.first.probes == 1).await;
+    run.stop();
+    m.set("soon.example.com", MockAnswer::addrs(&["192.0.2.3"]));
+    let mut run = Run::start(cfg(m.addr()), opts(&[0, 1500]), dir.path());
+    let r = run.until("second probe", |r, _| r.names.resolved_later == 1).await;
+    assert_eq!(r.waiting, 0);
+    let row = run.row("soon.example.com", 1);
+    assert_eq!((row.cert_hash, row.lookup.status), (1, Status::Resolved));
     run.stop();
 }
 
@@ -214,17 +245,30 @@ async fn stays_within_the_query_budget() {
     let m = MockDns::start().await;
     let dir = tempfile::tempdir().unwrap();
     // 20 queries per second is 10 probes per second; names wait at most 500 ms.
-    let c = DnsConfig { max_qps: 20, ..cfg(vec![m.addr()], 1) };
+    let c = DnsConfig { max_qps: 20, ..cfg(m.addr()) };
     let o = DnsOpts { stale_after: Duration::from_millis(500), ..opts(&[0]) };
     let mut run = Run::start(c, o, dir.path());
     let names: Vec<String> = (0..200).map(|i| format!("n{i}.example.com")).collect();
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
     let start = Instant::now();
     run.link.submit(&cert(1, &refs, RenewalClass::New));
-    let r = run.until("skips", |r, _| r.queued == 0 && r.in_flight == 0 && r.names > 0 && r.probes > 0).await;
+    let r = run.until("skips", |r, _| r.queued == 0 && r.in_flight == 0 && r.accepted > 0 && r.probes > 0).await;
     let secs = start.elapsed().as_secs_f64();
     assert!(r.probes as f64 <= 10.0 * secs + 3.0, "{} probes in {secs:.2}s", r.probes);
     assert_eq!(r.probes + r.skipped_busy + r.skipped_stale, 200, "{r:#?}");
     assert!(r.skipped_busy + r.skipped_stale > 150);
+    run.stop();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn samples_by_name() {
+    let m = MockDns::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut run = Run::start(DnsConfig { sample_pct: 50.0, ..cfg(m.addr()) }, opts(&[0]), dir.path());
+    let names: Vec<String> = (0..400).map(|i| format!("s{i}.example.com")).collect();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    run.link.submit(&cert(1, &refs, RenewalClass::New));
+    let r = run.until("probes", |r, _| r.probes + r.not_sampled == 400).await;
+    assert!((150..250).contains(&r.not_sampled), "{}", r.not_sampled);
     run.stop();
 }

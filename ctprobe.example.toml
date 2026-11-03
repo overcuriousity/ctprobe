@@ -12,3 +12,13 @@ extra_log_lists = ["https://valid.apple.com/ct/log_list/current_log_list.json"]
 include_test_logs = false
 # Percent of certificates the coverage assessment aims for.
 coverage_target = 95
+
+# DNS probing of every certificate name, through a recursive resolver of our own.
+[dns]
+resolver = "127.0.0.1:5335"
+# Queries per second to the resolver; each probe sends two.
+max_qps = 2000
+# Percent of names probed, chosen by a hash of the name.
+sample_pct = 100
+# Memory for the last answer per name, used to detect changes.
+state_max = "2GiB"

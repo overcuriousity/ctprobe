@@ -1,7 +1,7 @@
 [Unit]
 Description=ctprobe Certificate Transparency measurement service
-Wants=network-online.target
-After=network-online.target
+Wants=network-online.target ctprobe-unbound.service
+After=network-online.target ctprobe-unbound.service
 
 [Service]
 Type=notify

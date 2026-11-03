@@ -3,13 +3,16 @@
 <section class="tiles" id="tiles"></section>
 <section class="grid">
   <div class="card"><h2 id="first-h">First probe</h2><p class="sub">What each name resolved to when its certificate was seen</p><div class="scroll" id="first"></div></div>
-  <div class="card"><h2 id="later-h">Time to DNS</h2><p class="sub">Names without an address at first, probed again on a schedule</p><div id="later"></div></div>
+  <div class="card"><h2 id="later-h">Time to DNS</h2><p class="sub">Names without an address at first, probed again for up to 30 days</p><div id="later"></div></div>
 </section>
 <section class="grid">
   <div class="card"><h2 id="changes-h">Changes between certificates</h2><p class="sub">A name's first probe against the last answer held for it</p><div class="scroll" id="changes"></div></div>
-  <div class="card"><h2 id="flow-h">Names probed</h2><p class="sub">Every name of every unique certificate, renewals included</p><div id="flow"></div></div>
+  <div class="card"><h2 id="wild-h">Wildcards</h2><p class="sub">Asked as written, and for the name they cover when the certificate does not list it</p><div class="scroll" id="wild"></div></div>
 </section>
-<div class="card" style="margin-bottom:14px"><h2 id="resolvers-h">Resolvers</h2><p class="sub" id="resolvers-sub"></p><div class="scroll" id="resolvers"></div></div>
+<section class="grid">
+  <div class="card"><h2 id="flow-h">Names probed</h2><p class="sub">Every name of every unique certificate, renewals included</p><div id="flow"></div></div>
+  <div class="card"><h2 id="resolver-h">Resolver</h2><p class="sub">Per query, with A and AAAA counted apart</p><div class="scroll" id="resolver"></div></div>
+</section>
 <div class="card">
   <div class="card-head">
     <div><h2>Over time</h2><p class="sub">Shares of first probes, and of answers that changed since an earlier day</p></div>

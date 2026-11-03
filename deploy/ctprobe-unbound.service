@@ -1,0 +1,23 @@
+[Unit]
+Description=Unbound recursive resolver for ctprobe
+Wants=network-online.target
+After=network-online.target
+Before=ctprobe.service
+
+[Service]
+ExecStart=@UNBOUND@ -d -p -c /etc/ctprobe/unbound.conf
+Restart=on-failure
+RestartSec=5
+DynamicUser=yes
+LimitNOFILE=65536
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target

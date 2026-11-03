@@ -747,12 +747,12 @@ async fn dns_probes_reach_sql_api_and_trends() {
     let ca = TestCa::default();
     let entries = vec![ca.final_cert(1, &["a.example.com", "gone.example.org"]), ca.final_cert(2, &["*.example.net"])];
     let log = MockLog::start(MockOpts::rfc6962(0).with_entries(entries)).await;
-    let cfg = ctprobe::config::DnsConfig { resolvers: vec![dns.addr()], quorum: 1, ..Default::default() };
+    let cfg = ctprobe::config::DnsConfig { resolver: Some(dns.addr()), ..Default::default() };
     let a = app_with(log, cfg).await;
     let url = format!(
         "{}/api/sql?q={}",
         a.base,
-        "SELECT%20name%2C%20status%2C%20v4%2C%20v6%2C%20reg_domain%20FROM%20dns%20WHERE%20attempt%20%3D%200%20ORDER%20BY%20name"
+        "SELECT%20name%2C%20status%2C%20v4%2C%20v6%2C%20reg_domain%20FROM%20dns%20WHERE%20attempt%20%3D%200%20AND%20kind%20%3D%20%27name%27%20ORDER%20BY%20name"
     );
     let rows = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
@@ -772,11 +772,23 @@ async fn dns_probes_reach_sql_api_and_trends() {
     assert_eq!(rows[0][4], "example.com");
     assert_eq!(rows[1][0], "gone.example.org");
     assert_eq!(rows[1][1], "nxdomain");
-    let v = get_json(format!("{}/api/dns", a.base)).await;
+    // The live figures are republished four times a second.
+    let v = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let v = get_json(format!("{}/api/dns", a.base)).await;
+            if v["probes"].as_u64() == Some(4) {
+                return v;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("live DNS figures did not arrive");
     assert_eq!(v["enabled"], true);
-    assert_eq!(v["first"]["probes"], 2);
-    assert_eq!(v["wildcards"], 1);
-    assert_eq!(v["resolvers"][0]["addr"], dns.addr().to_string());
+    assert_eq!(v["names"]["first"]["probes"], 2);
+    assert_eq!(v["wildcards"]["first"]["probes"], 1);
+    assert_eq!(v["bases"]["first"]["probes"], 1);
+    assert_eq!(v["resolver"]["addr"], dns.addr().to_string());
     let trend = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let v = get_json(format!("{}/api/trends/dns?hours=1&bucket=minute", a.base)).await;

@@ -230,7 +230,7 @@ impl Pipeline {
         let tasks = Arc::new(Mutex::new(Vec::new()));
         let (dns_link, dns_thread) = if cfg.dns.enabled() {
             let (l, t) = dns::start(cfg.dns.clone(), opts.dns.clone(), &cfg.data_dir, stop.subscribe())?;
-            tracing::info!("probing names via {} DNS resolver(s)", cfg.dns.resolvers.len());
+            tracing::info!("probing names via the DNS resolver at {}", cfg.dns.resolver.map(|r| r.to_string()).unwrap_or_default());
             (Some(l), Some(t))
         } else {
             (None, None)

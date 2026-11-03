@@ -64,6 +64,8 @@ pub fn trend_query(metric: &str, from: i64, to: i64, bucket: &str, today: i64, h
                100.0 * SUM(first_v6) / NULLIF(SUM(first_probes), 0) AS v6_pct, \
                100.0 * SUM(first_nxdomain) / NULLIF(SUM(first_probes), 0) AS nxdomain_pct, \
                100.0 * SUM(changed) / NULLIF(SUM(compared), 0) AS changed_pct, \
+               100.0 * SUM(v4_changed) / NULLIF(SUM(v4_compared), 0) AS v4_changed_pct, \
+               100.0 * SUM(v6_changed) / NULLIF(SUM(v6_compared), 0) AS v6_changed_pct, \
                100.0 * SUM(network_changed) / NULLIF(SUM(compared), 0) AS network_changed_pct, \
                CAST(SUM(first_probes) AS DOUBLE) / {secs} AS probed_per_sec, \
                CAST(SUM(skipped) AS DOUBLE) / {secs} AS skipped_per_sec \
