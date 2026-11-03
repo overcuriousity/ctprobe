@@ -266,3 +266,51 @@ fn expiry_spares_days_nightly_has_not_finished() {
     expire::enforce(d.path(), 500, today).unwrap();
     assert!(!d.path().join("certs/day=2026-01-01").exists());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dns_day_compacts_sorted_by_domain_and_still_answers_lookups() {
+    use ctprobe::dns::outcome::{Lookup, Status};
+    use ctprobe::dns::queue::Kind;
+    use ctprobe::dns::DnsRow;
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let probe = |name: &str, domain: &str, hash: u64, at: i64| DnsRow {
+        probed_at_ms: at,
+        name: name.into(),
+        kind: Kind::Name,
+        reg_domain: Some(domain.into()),
+        cert_hash: hash,
+        cert_seen_at_ms: at,
+        attempt: 0,
+        renewal: "new",
+        lookup: Lookup { status: Status::Resolved, v4: vec!["192.0.2.1".parse().unwrap()], v6: vec![], cnames: vec![], ttl: Some(60) },
+        latency_ms: 5,
+        last_miss_ms: None,
+        prev: None,
+    };
+    let mut w = Writer::open(dir.path(), 2).unwrap();
+    w.push_dns(probe("www.zeta.com", "zeta.com", u64::MAX, D + 5));
+    w.push_dns(probe("alpha.org", "alpha.org", 7, D + 3));
+    w.flush(3).unwrap();
+    w.publish(3).unwrap();
+    w.push_dns(probe("www.alpha.org", "alpha.org", 8, D + 4));
+    w.flush(4).unwrap();
+    w.publish(4).unwrap();
+    nightly::run_nightly(&cfg(dir.path()), day()).await.unwrap();
+
+    let parts = list_parts(dir.path(), "dns");
+    assert_eq!(parts.len(), 1, "{parts:?}");
+    assert!(parts[0].ends_with("daily.parquet"));
+    let domains: Vec<String> = read(dir.path(), "dns")
+        .iter()
+        .flat_map(|b| b.column_by_name("reg_domain").unwrap().as_string::<i32>().iter().map(|d| d.unwrap().to_string()).collect::<Vec<_>>())
+        .collect();
+    assert_eq!(domains, ["alpha.org", "alpha.org", "zeta.com"]);
+
+    let engine = ctprobe::query::QueryEngine::open(dir.path()).unwrap();
+    let r = engine
+        .internal(format!("SELECT name FROM dns WHERE cert_hash = CAST('{}' AS BIGINT UNSIGNED)", u64::MAX), 10, None, None)
+        .await
+        .unwrap();
+    assert_eq!(r.rows, vec![vec![serde_json::json!("www.zeta.com")]]);
+}

@@ -19,6 +19,12 @@ pub struct Counts {
     pub names: u32,
     pub new_names: u32,
     pub new_domains: u32,
+    /// First DNS probes of certificate names, and those that found an address.
+    /// Absent from files written before DNS probing.
+    #[serde(default)]
+    pub dns_probed: u32,
+    #[serde(default)]
+    pub dns_resolved: u32,
 }
 
 impl Counts {
@@ -28,6 +34,8 @@ impl Counts {
         self.names = self.names.saturating_add(o.names);
         self.new_names = self.new_names.saturating_add(o.new_names);
         self.new_domains = self.new_domains.saturating_add(o.new_domains);
+        self.dns_probed = self.dns_probed.saturating_add(o.dns_probed);
+        self.dns_resolved = self.dns_resolved.saturating_add(o.dns_resolved);
     }
 }
 
@@ -38,6 +46,8 @@ pub struct Totals {
     pub names: u64,
     pub new_names: u64,
     pub new_domains: u64,
+    pub dns_probed: u64,
+    pub dns_resolved: u64,
     /// Seconds of the frame with data, so averages ignore downtime.
     pub seconds: u64,
 }
@@ -115,6 +125,8 @@ impl History {
                 v.totals.names += c.names as u64;
                 v.totals.new_names += c.new_names as u64;
                 v.totals.new_domains += c.new_domains as u64;
+                v.totals.dns_probed += c.dns_probed as u64;
+                v.totals.dns_resolved += c.dns_resolved as u64;
                 v.totals.seconds += BUCKET_S as u64;
             }
         }

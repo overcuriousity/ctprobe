@@ -7,6 +7,8 @@
 
 use crate::config::Config;
 use crate::coverage;
+use crate::dns::outcome::Status;
+use crate::dns::queue::Kind;
 use crate::dns::{self, DnsLink, DnsOpts, DnsOut, DnsStats};
 use crate::fetch::{spawn_fetcher, Batch, FetchOpts, LogStats};
 use crate::history::{Counts, History};
@@ -441,7 +443,7 @@ struct GlobalAgg {
     new_names_rate: RateWindow,
     new_domains_rate: RateWindow,
     /// Counters at the last tick, for the history's deltas.
-    seen: [u64; 5],
+    seen: [u64; 7],
 }
 
 impl Default for GlobalAgg {
@@ -457,7 +459,7 @@ impl Default for GlobalAgg {
             names_rate: w(),
             new_names_rate: w(),
             new_domains_rate: w(),
-            seen: [0; 5],
+            seen: [0; 7],
         }
     }
 }
@@ -625,7 +627,15 @@ impl Worker {
         let Some(d) = &self.dns else { return };
         while let Ok(o) = d.out.try_recv() {
             match o {
-                DnsOut::Row(r) => self.writer.push_dns(r),
+                DnsOut::Row(r) => {
+                    if r.kind == Kind::Name && r.attempt == 0 {
+                        self.live.dns_probed.fetch_add(1, Ordering::Relaxed);
+                        if r.lookup.status == Status::Resolved {
+                            self.live.dns_resolved.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    self.writer.push_dns(r)
+                }
                 DnsOut::Minute(m) => self.writer.push_dns_minute(m),
             }
         }
@@ -647,11 +657,19 @@ impl Worker {
         rates.names = global.names_rate.rate();
         rates.new_names = global.new_names_rate.rate();
         rates.new_domains = global.new_domains_rate.rate();
-        let now = [g(&live.raw), g(&live.unique), g(&live.names), g(&live.new_names), g(&live.new_domains)];
-        let [raw, unique, names, new_names, new_domains] =
+        let now = [
+            g(&live.raw),
+            g(&live.unique),
+            g(&live.names),
+            g(&live.new_names),
+            g(&live.new_domains),
+            g(&live.dns_probed),
+            g(&live.dns_resolved),
+        ];
+        let [raw, unique, names, new_names, new_domains, dns_probed, dns_resolved] =
             std::array::from_fn(|i| (now[i] - global.seen[i]) as u32);
         global.seen = now;
-        let counts = Counts { raw, unique, names, new_names, new_domains };
+        let counts = Counts { raw, unique, names, new_names, new_domains, dns_probed, dns_resolved };
         live.history.lock().unwrap().add(chrono::Utc::now().timestamp(), counts);
         self.global.peak = self.global.peak.max(self.global.sec_unique);
         self.global.unique += self.global.sec_unique;

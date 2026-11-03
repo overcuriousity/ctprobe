@@ -14,7 +14,8 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 NoNewPrivileges=yes
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# Unbound lists the interfaces over netlink at startup.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 LockPersonality=yes
 ProtectKernelTunables=yes
 ProtectControlGroups=yes

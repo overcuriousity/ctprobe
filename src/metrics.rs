@@ -108,6 +108,9 @@ pub struct LiveState {
     pub renew_exact: AtomicU64,
     pub renew_name: AtomicU64,
     pub renew_new: AtomicU64,
+    /// First DNS probes of certificate names, and those that found an address.
+    pub dns_probed: AtomicU64,
+    pub dns_resolved: AtomicU64,
     pub tracker_names: AtomicU64,
     pub tracker_bytes: AtomicU64,
     pub rss_bytes: AtomicU64,

@@ -147,6 +147,13 @@ pub struct DnsMinuteRow {
     pub skipped: i64,
     pub ttd_p50_ms: Option<i64>,
     pub ttd_p90_ms: Option<i64>,
+    /// Names found later, by when the probe that found them ran after the sighting.
+    pub found_15m: i64,
+    pub found_1h: i64,
+    pub found_1d: i64,
+    pub found_later: i64,
+    /// Queries sent, for every kind of name.
+    pub queries: i64,
 }
 
 pub enum DnsOut {
@@ -188,6 +195,8 @@ pub struct Changes {
     /// Any difference: addresses, aliases or outcome.
     pub changed: u64,
     pub status_changed: u64,
+    /// Names whose IPv4 or IPv6 addresses differ, gained or lost included.
+    pub ip_changed: u64,
     pub cname_changed: u64,
     pub network_changed: u64,
     /// Compared answers that both had IPv4 addresses.
@@ -207,6 +216,7 @@ impl Changes {
         self.compared += 1;
         self.changed += d.changed as u64;
         self.status_changed += d.status_changed as u64;
+        self.ip_changed += (d.v4_changed || d.v6_changed) as u64;
         self.cname_changed += d.cname_changed as u64;
         self.network_changed += d.network_changed as u64;
         if let Some(f) = d.v4 {
@@ -278,10 +288,35 @@ pub struct ResolverReport {
     pub answers: u64,
     pub nxdomain: u64,
     pub timeouts: u64,
-    /// SERVFAIL, REFUSED and other codes, or unreachable.
+    /// All of the four below.
     pub errors: u64,
+    pub servfail: u64,
+    pub refused: u64,
+    /// Other response codes.
+    pub other_rcode: u64,
+    /// Nothing listening, or an unreadable reply.
+    pub unreachable: u64,
     pub latency: Option<Quantiles>,
 }
+
+/// The last few minutes, for telling whether probing works right now.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Recent {
+    pub secs: f64,
+    pub queries: u64,
+    pub answers: u64,
+    pub nxdomain: u64,
+    pub timeouts: u64,
+    pub errors: u64,
+    pub servfail: u64,
+    pub refused: u64,
+    pub unreachable: u64,
+    /// Names skipped for lack of capacity.
+    pub skipped: u64,
+}
+
+/// Span of `Recent`.
+const RECENT: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct DnsReport {
@@ -318,6 +353,7 @@ pub struct DnsReport {
     pub tracked_bytes: u64,
     /// The last error of the retry queue, if any.
     pub queue_error: Option<String>,
+    pub recent: Recent,
 }
 
 /// What the web layer reads. The scheduler republishes it four times a second.
@@ -462,6 +498,8 @@ struct Scheduler {
     minute_ttd: Histogram<u64>,
     /// Skips counted into earlier minute rows.
     skipped_seen: u64,
+    /// Counters as published, oldest first, for `Recent`.
+    history: VecDeque<(Instant, Recent)>,
 }
 
 fn group_index(k: Kind) -> usize {
@@ -521,6 +559,7 @@ impl Scheduler {
             minute: DnsMinuteRow::default(),
             minute_ttd: histogram(),
             skipped_seen: 0,
+            history: VecDeque::new(),
         }
     }
 
@@ -711,8 +750,13 @@ impl Scheduler {
                 Reply::Answer { .. } => s.answers += 1,
                 Reply::NxDomain => s.nxdomain += 1,
                 Reply::Timeout => s.timeouts += 1,
-                Reply::Rcode(_) | Reply::Error => s.errors += 1,
+                Reply::Rcode(2) => s.servfail += 1,
+                Reply::Rcode(5) => s.refused += 1,
+                Reply::Rcode(_) => s.other_rcode += 1,
+                Reply::Error => s.unreachable += 1,
             }
+            s.errors = s.servfail + s.refused + s.other_rcode + s.unreachable;
+            self.minute.queries += 1;
             if !matches!(r, Reply::Timeout) {
                 self.latency.saturating_record(t.as_micros().max(1) as u64);
             }
@@ -787,7 +831,15 @@ impl Scheduler {
                 }
                 if is_name {
                     self.minute_ttd.saturating_record(upper);
-                    self.minute.resolved_later += 1;
+                    let m = &mut self.minute;
+                    m.resolved_later += 1;
+                    const MIN: u64 = 60_000;
+                    match upper {
+                        u if u <= 15 * MIN => m.found_15m += 1,
+                        u if u <= 60 * MIN => m.found_1h += 1,
+                        u if u <= 1440 * MIN => m.found_1d += 1,
+                        _ => m.found_later += 1,
+                    }
                 }
             }
         } else if next >= self.opts.schedule.len() {
@@ -839,7 +891,7 @@ impl Scheduler {
             m.ttd_p90_ms = Some(self.minute_ttd.value_at_quantile(0.9) as i64);
         }
         self.minute_ttd.reset();
-        if m.probes > 0 || m.skipped > 0 {
+        if m.probes > 0 || m.skipped > 0 || m.queries > 0 {
             let _ = self.out.try_send(DnsOut::Minute(m));
         }
     }
@@ -858,6 +910,39 @@ impl Scheduler {
         r.resolver.latency = quantiles(&self.latency, 1000.0);
         r.tracked_names = self.last.len() as u64;
         r.tracked_bytes = self.last.bytes_used();
+        let s = &r.resolver;
+        let now = Recent {
+            secs: 0.0,
+            queries: s.queries,
+            answers: s.answers,
+            nxdomain: s.nxdomain,
+            timeouts: s.timeouts,
+            errors: s.errors,
+            servfail: s.servfail,
+            refused: s.refused,
+            unreachable: s.unreachable,
+            skipped: r.skipped_busy + r.skipped_stale + self.stats.jobs_dropped.load(Ordering::Relaxed),
+        };
+        let at = Instant::now();
+        while self.history.front().is_some_and(|(t, _)| at.duration_since(*t) > RECENT) {
+            self.history.pop_front();
+        }
+        r.recent = match self.history.front() {
+            Some((t, old)) => Recent {
+                secs: at.duration_since(*t).as_secs_f64(),
+                queries: now.queries - old.queries,
+                answers: now.answers - old.answers,
+                nxdomain: now.nxdomain - old.nxdomain,
+                timeouts: now.timeouts - old.timeouts,
+                errors: now.errors - old.errors,
+                servfail: now.servfail - old.servfail,
+                refused: now.refused - old.refused,
+                unreachable: now.unreachable - old.unreachable,
+                skipped: now.skipped - old.skipped,
+            },
+            None => Recent::default(),
+        };
+        self.history.push_back((at, now));
         *self.stats.report.lock().unwrap() = r.clone();
     }
 }

@@ -14,17 +14,22 @@ use parquet::file::properties::WriterProperties;
 use parquet::schema::types::ColumnPath;
 use std::path::Path;
 
+/// Distinct values a bloom filter is sized for, per row group.
 const BLOOM_NDV: u64 = 5_000_000;
+/// `dns` row groups hold a million rows, so no column has more distinct values.
+const DNS_BLOOM_NDV: u64 = 1_000_000;
 
-fn props(bloom: bool) -> WriterProperties {
+/// Writer settings with a bloom filter on each of `bloom`, so lookups by
+/// those columns skip the row groups that cannot hold the value.
+fn props(bloom: &[(&str, u64)]) -> WriterProperties {
     let mut b = WriterProperties::builder()
         .set_compression(Compression::ZSTD(ZstdLevel::try_new(6).expect("valid level")))
         .set_max_row_group_row_count(Some(1_000_000));
-    if bloom {
-        let c = ColumnPath::from("primary_domain");
+    for (col, ndv) in bloom {
+        let c = ColumnPath::from(*col);
         b = b
             .set_column_bloom_filter_enabled(c.clone(), true)
-            .set_column_bloom_filter_max_ndv(c.clone(), BLOOM_NDV)
+            .set_column_bloom_filter_max_ndv(c.clone(), *ndv)
             .set_column_bloom_filter_fpp(c, 0.01);
     }
     b.build()
@@ -42,7 +47,7 @@ async fn compact_table(
     schema: SchemaRef,
     day: &str,
     order: &str,
-    bloom: bool,
+    bloom: &[(&str, u64)],
 ) -> Result<()> {
     let dir = data.join(table).join(format!("day={day}"));
     let files = list_day(data, table, day);
@@ -68,10 +73,13 @@ pub async fn run(data: &Path, day: &str, budget: u64) -> Result<()> {
     if free_bytes(data).is_some_and(|f| f < need) {
         expire::enforce(data, budget, Utc::now().date_naive())?;
     }
-    compact_table(data, "certs", certs_schema(), day, "ORDER BY primary_domain NULLS LAST, seen_at", true).await?;
-    compact_table(data, "sightings", sightings_schema(), day, "", false).await?;
-    compact_table(data, "rollup_minute", rollup_minute_schema(), day, "", false).await?;
-    compact_table(data, "dns", dns_schema(), day, "ORDER BY name, probed_at", false).await?;
-    compact_table(data, "dns_minute", dns_minute_schema(), day, "ORDER BY minute", false).await?;
+    compact_table(data, "certs", certs_schema(), day, "ORDER BY primary_domain NULLS LAST, seen_at", &[("primary_domain", BLOOM_NDV)]).await?;
+    compact_table(data, "sightings", sightings_schema(), day, "", &[]).await?;
+    compact_table(data, "rollup_minute", rollup_minute_schema(), day, "", &[]).await?;
+    // The Domain page reads by registered domain, the Certificate page by hash.
+    let dns_order = "ORDER BY reg_domain NULLS LAST, name, probed_at";
+    let dns_bloom = [("reg_domain", DNS_BLOOM_NDV), ("cert_hash", DNS_BLOOM_NDV)];
+    compact_table(data, "dns", dns_schema(), day, dns_order, &dns_bloom).await?;
+    compact_table(data, "dns_minute", dns_minute_schema(), day, "ORDER BY minute", &[]).await?;
     Ok(())
 }

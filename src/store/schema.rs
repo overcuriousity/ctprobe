@@ -182,4 +182,10 @@ schema!(dns_minute_schema, [
     ("skipped", Int64, false),
     ("ttd_p50_ms", Int64, true),
     ("ttd_p90_ms", Int64, true),
+    // Added after the first release, so older files read them as null.
+    ("found_15m", Int64, true),
+    ("found_1h", Int64, true),
+    ("found_1d", Int64, true),
+    ("found_later", Int64, true),
+    ("queries", Int64, true),
 ]);

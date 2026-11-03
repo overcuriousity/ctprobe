@@ -21,8 +21,11 @@ function logsFor(cov, pct) {
 }
 
 async function load() {
-  const [sz, cost, cov, conc, stageRows, settle, quality, live, report] = await Promise.all(
-    ['sizing', 'cost', 'coverage', 'concentration', 'stages', 'settling', 'quality'].map(trend).concat(getJson('/api/live'), getJson('/api/logs')));
+  const [sz, cost, cov, conc, stageRows, settle, quality, dnsRows, live, report] = await Promise.all(
+    ['sizing', 'cost', 'coverage', 'concentration', 'stages', 'settling', 'quality', 'dns_sizing'].map(trend).concat(getJson('/api/live'), getJson('/api/logs')));
+  const d = toObj(dnsRows, 0);
+  const dnsState = d.minutes ? 'early' : 'none';
+  const pctOf = (v) => (v === null || v === undefined ? '–' : v.toFixed(1) + '%');
   applyStatus(live);
   const s = toObj(sz, 0), c = toObj(cost, 0);
   const days = s.first_ms ? (s.last_ms - s.first_ms) / 86400000 : 0;
@@ -61,6 +64,10 @@ async function load() {
     ['CPU per million certificates', c.cpu_seconds_per_million == null ? '–' : c.cpu_seconds_per_million.toFixed(0) + ' s', 'early', 'Measured on this machine, not the target hardware.', 'cost'],
     ['Disk per million certificates', fmtBytes(c.disk_bytes_per_million), 'early', 'Falls after nightly compaction.', 'cost'],
     ['Tracker memory per name', c.tracker_bytes_per_name == null ? '–' : num2(c.tracker_bytes_per_name, 1) + ' bytes', 'early', 'Rises and falls as tables double.', 'tracker'],
+    ['DNS queries per second, typical', rate(d.queries_p50), dnsState, 'A and AAAA for every name probed, later probes included. Scale up if only a sample of names is probed.', 'dnsqps'],
+    ['DNS queries per second, p99 minute', rate(d.queries_p99), dnsState, 'Size the resolver for this.', 'dnsqps'],
+    ['Names with an address at first probe', pctOf(d.resolved_pct), dnsState, 'Certificate names that resolve when the certificate is seen.', 'dnsshare'],
+    ['Names never resolving within 30 days', pctOf(d.never_pct), d.never_pct == null ? 'none' : 'early', 'Of names without an address at first. Known only once their 30 days are over.', 'dnsttd'],
   ];
   exportRows = rows.map((r) => [r[0], r[1], BADGE[r[2]][1], r[3]]);
 
@@ -105,6 +112,8 @@ function exportCsv() {
 }
 
 keepingCard($('#keeping'));
+$('#dns-h').append(info('dnshealth'));
+dnsHealthCard($('#dns-health'));
 coverageSummary($('#coverage'));
 logTable($('#logs'), { filter: (l) => l.state !== 'healthy', emptyText: 'All logs are healthy', persist: 'attention' });
 $('#keeping-h').append(info('keeping'));

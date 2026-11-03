@@ -6,7 +6,7 @@ mod search;
 mod sql;
 
 pub use search::{DomainHit, Mode};
-pub use sql::{quote, CertFilter, CertPage, CertScope, QueryError, QueryResult, SortKey, MAX_OFFSET};
+pub use sql::{quote, CertFilter, CertPage, CertScope, DnsFilter, QueryError, QueryResult, SortKey, MAX_OFFSET};
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};

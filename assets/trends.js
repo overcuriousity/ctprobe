@@ -1,5 +1,5 @@
 'use strict';
-const TIPS = { volume: 'raw', peaks: 'peaks', renewals: 'renewals', state_growth: 'tracker', resources: 'cost', concentration: 'concentration', quality: 'backlog', validity: 'validity' };
+const TIPS = { volume: 'raw', peaks: 'peaks', renewals: 'renewals', state_growth: 'tracker', resources: 'cost', concentration: 'concentration', quality: 'backlog', validity: 'validity', dns: 'dnsshare', dns_changes: 'dnsip', dns_ttd: 'dnsttd' };
 const LINES = [
   ['volume', 'Volume', 'Entries per second', null],
   ['peaks', 'Peaks', 'Unique certificates per second: median and p99 minute, highest second', null],
@@ -8,6 +8,9 @@ const LINES = [
   ['state_growth', 'State growth', 'Distinct names tracked', null],
   ['resources', 'Resources', 'Bytes', fmtBytes],
   ['concentration', 'Concentration', 'Percent of a day\'s certificates from the top registered domains; after the first nightly run', (v) => v.toFixed(1) + '%'],
+  ['dns', 'DNS at first probe', 'Share of names with an address, IPv4, IPv6 and NXDOMAIN when their certificate was seen', (v) => v.toFixed(1) + '%'],
+  ['dns_changes', 'IP changes since an earlier day', 'Share of names whose addresses differ from the last answer of an earlier day', (v) => v.toFixed(1) + '%'],
+  ['dns_ttd', 'Time to DNS', 'Of names found on a later probe, the share found within each time of the sighting', (v) => v.toFixed(1) + '%'],
 ];
 const BARS = [
   ['issuers', 'Issuers'], ['tlds', 'TLDs'], ['keys', 'Key types'], ['validity', 'Validity'],

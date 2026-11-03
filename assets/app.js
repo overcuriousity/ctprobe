@@ -51,6 +51,14 @@ const HELP = {
   dnswild: 'A wildcard asked as written finds a wildcard record if one exists. The covered name is asked only when the certificate does not list it too.',
   dnsflow: 'Probing never slows ingest. A fixed sample of names, chosen by a hash of the name, is probed on every certificate. Names that do not fit the query budget in a burst are skipped and counted here.',
   nxdomain: 'The resolver says the name does not exist.',
+  dnshealth: 'Whether DNS probing works right now, from the last 5 minutes of queries. Failures are timeouts and errors; a few are normal, since some name servers are broken.',
+  dnsshare: 'Names with an A or AAAA record when their certificate was seen. On Live, since the last restart.',
+  dnsip: 'Names whose IPv4 or IPv6 addresses differ from the last answer of an earlier day, mostly at renewals. On Live, since the last restart.',
+  dnscert: 'Each name is asked for A and AAAA when the certificate is seen and, without an address, again for up to 30 days. A name already being probed for another certificate is not probed twice; its latest answer is shown instead.',
+  dnsdomain: 'The latest answer for each name, from probes kept in the rolling window. IP changes count first probes whose addresses differ from an earlier day.',
+  dnsqps: 'Queries the resolver must answer: an A and an AAAA for each probe, first probes and later ones together.',
+  dnsttd: 'Of names that had no address at first and got one on a later probe, the share found within each time of the sighting.',
+  dnsfilter: 'What DNS found when the certificate was seen. Certificates seen before DNS probing began, or whose names were outside the sample, match none of these.',
   validity: 'Certificate lifetime. Shorter limits take effect in March 2027 and March 2029, so the same sites will issue more often.',
 };
 function info(key) {
@@ -213,7 +221,7 @@ themeBtn.addEventListener('click', () => {
 
 // Certificate table with filters, shared by Search and Domain. Sorting, filtering
 // and paging happen on the server, and all of it lives in the URL.
-const CERT_FILTERS = ['from', 'to', 'issuer', 'issuer_contains', 'tld', 'key_type', 'validity', 'san', 'size', 'renewal', 'wildcard', 'precert', 'expires_from', 'expires_to', 'random'];
+const CERT_FILTERS = ['from', 'to', 'issuer', 'issuer_contains', 'tld', 'key_type', 'validity', 'san', 'size', 'renewal', 'wildcard', 'precert', 'dns', 'expires_from', 'expires_to', 'random'];
 const CERT_COLUMNS = [
   { id: 'seen_at', sort: true }, { id: 'cn', sort: true }, { id: 'issuer_cn', sort: true }, { id: 'not_after', sort: true },
   { id: 'san_count', sort: true, num: true }, { id: 'key_type', sort: true }, { id: 'renewal', sort: true },
@@ -246,6 +254,7 @@ function certPanel(host, base, initial) {
     renewal: choice('renewal', 'Any renewal class', [['new', 'New'], ['name', 'Name match'], ['exact', 'Exact match']]),
     wildcard: choice('wildcard', 'Wildcard or not', [['true', 'Wildcard only'], ['false', 'No wildcard']]),
     precert: choice('precert', 'Certificate or precertificate', [['true', 'Precertificates only'], ['false', 'Final certificates only']]),
+    dns: choice('dns', 'DNS: any', [['address', 'DNS: a name had an address'], ['no_address', 'DNS: no name had an address'], ['ip_changed', 'DNS: IP changed']]),
     expires_from: h('input', { type: 'date', 'aria-label': 'Expires from', title: 'Expires from' }),
     expires_to: h('input', { type: 'date', 'aria-label': 'Expires to', title: 'Expires to' }),
     random: h('input', { type: 'number', min: '1', max: '100000', placeholder: 'Random N', style: 'width:100px', 'aria-label': 'Random sample size' }),
@@ -338,7 +347,7 @@ function certPanel(host, base, initial) {
     h('div', { class: 'filters' }, fields.key_type, fields.validity, fields.san, fields.size, fields.precert, fields.expires_from, fields.expires_to, fields.random));
   if (['key_type', 'validity', 'san', 'size', 'precert', 'expires_from', 'expires_to', 'random'].some((k) => f[k])) more.open = true;
   const form = h('form', { class: 'noprint', on: { submit: (e) => { e.preventDefault(); collect(); offset = 0; load(); } } },
-    h('div', { class: 'filters' }, fields.from, fields.to, fields.issuer_contains, fields.tld, fields.renewal, fields.wildcard, apply, csv, chips), more,
+    h('div', { class: 'filters' }, fields.from, fields.to, fields.issuer_contains, fields.tld, fields.renewal, fields.wildcard, fields.dns, info('dnsfilter'), apply, csv, chips), more,
     h('button', { type: 'submit', hidden: 'hidden' }));
   clear(host).append(form, out, h('div', { class: 'pager noprint' }, prev, next, count));
   load();
@@ -452,6 +461,67 @@ function keepingCard(host) {
     }
     if (v.cause_unclear) out.push(line('The cause is unclear: neither ctprobe nor a single log explains it.'));
     out.push(line(v.ctprobe_limit ? 'ctprobe itself is the limit' : 'ctprobe itself is not the limit', ': ', h('span', {}, 'pipeline ' + v.pipeline_busy_pct.toFixed(0) + '% busy, fetch queue ' + v.queue_full_pct.toFixed(0) + '% full.')));
+    clear(host).append(...out);
+  });
+}
+
+// DNS figures, fetched once for every part of a page that shows them.
+const DNS_REFRESH_MS = 10000;
+const dnsFeed = { subs: [], last: null, started: false };
+function onDns(fn) {
+  dnsFeed.subs.push(fn);
+  if (dnsFeed.last) fn(dnsFeed.last);
+  if (dnsFeed.started) return;
+  dnsFeed.started = true;
+  const poll = () => getJson('/api/dns').then((r) => { dnsFeed.last = r; dnsFeed.subs.forEach((f) => f(r)); }).catch(() => {});
+  poll();
+  setInterval(poll, DNS_REFRESH_MS);
+}
+const share = (n, d) => (d ? (100 * n / d).toFixed(1) + '%' : '–');
+
+// Whether probing works now, and if not, the most likely cause.
+function dnsVerdict(r) {
+  const x = r.recent;
+  if (!x || x.secs < 30) return ['Measuring', ''];
+  if (!x.queries) return x.skipped ? ['Failing', 'bad'] : ['Idle', ''];
+  const failed = 100 * (x.timeouts + x.errors) / x.queries;
+  if (failed >= 50) return ['Failing', 'bad'];
+  if (failed >= 5 || x.skipped || r.queue_error) return ['Strained', 'warn'];
+  return ['Healthy', 'good'];
+}
+
+function dnsCause(r) {
+  const x = r.recent, addr = r.resolver.addr;
+  const top = Math.max(x.unreachable, x.timeouts, x.servfail, x.refused);
+  if (!top || 100 * (x.timeouts + x.errors) / Math.max(1, x.queries) < 5) return null;
+  if (top === x.unreachable) return 'Nothing answers at ' + addr + '. Check that the resolver runs.';
+  if (top === x.timeouts) return 'The resolver at ' + addr + ' answers too slowly or cannot reach name servers. Check its log and any firewall.';
+  if (top === x.servfail) return 'The resolver at ' + addr + ' fails to resolve. Its log says why.';
+  return 'The resolver at ' + addr + ' refuses ctprobe. Check its access control.';
+}
+
+function dnsHealthCard(host) {
+  const line = (...kids) => h('p', { class: 'line' }, ...kids);
+  onDns((r) => {
+    if (!r.enabled) { clear(host).append(line('DNS probing is off. Set a resolver under [dns] in the configuration to turn it on.')); return; }
+    const [label, cls] = dnsVerdict(r);
+    const x = r.recent;
+    const out = [h('div', {}, h('span', { class: 'badge big ' + cls }, label))];
+    if (x && x.secs >= 30) {
+      const min = Math.round(x.secs / 60);
+      out.push(line('Over the last ' + min + ' min: ' + fmt(x.queries / x.secs) + ' queries/s, ' + share(x.answers + x.nxdomain, x.queries) + ' answered, '
+        + share(x.timeouts, x.queries) + ' timed out, ' + share(x.errors, x.queries) + ' errors.'));
+      if (x.errors) out.push(line('Errors: SERVFAIL ' + fmt(x.servfail) + ', refused ' + fmt(x.refused) + ', unreachable ' + fmt(x.unreachable) + '.'));
+      if (x.skipped) out.push(line('Skipped for lack of capacity: ' + fmt(x.skipped) + ' names.'));
+    } else {
+      out.push(line('A verdict needs a few minutes of queries.'));
+    }
+    const cause = dnsCause(r);
+    if (cause) out.push(h('p', { class: 'line strong' }, cause));
+    if (r.queue_error) out.push(h('p', { class: 'line err' }, 'Retry queue: ' + r.queue_error));
+    const late = r.retry_late ? ', running late by a median of ' + fmtMs(r.retry_late.p50_ms) : '';
+    out.push(line('Waiting for a later probe: ' + fmt(r.waiting) + ' names' + late + '.'));
+    out.push(line(h('a', { href: '/dns' }, 'DNS details')));
     clear(host).append(...out);
   });
 }

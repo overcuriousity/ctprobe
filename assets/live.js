@@ -4,8 +4,21 @@ const FRAME_KEY = 'timeframe';
 const frame = $('#timeframe');
 frame.value = localStorage.getItem(FRAME_KEY) || '15';
 let chart = null;
+let dns = null;
+let lastSnap = null;
+let lastView = null;
+
+function dnsTiles() {
+  if (!dns || !dns.enabled) return [];
+  const f = dns.names.first, e = dns.names.earlier_day;
+  return [
+    tile('Address at first probe', share(f.resolved, f.probes), 'IPv4 ' + share(f.v4, f.probes) + ' · IPv6 ' + share(f.v6, f.probes), 'dnsshare'),
+    tile('IP changed since an earlier day', share(e.ip_changed, e.compared), fmt(e.compared) + ' compared', 'dnsip'),
+  ];
+}
 
 function render(s) {
+  lastSnap = s;
   applyStatus(s);
   const rawT = s.raw_total, uniqT = s.unique_total || 0;
   const renewed = s.renew_exact_total + s.renew_name_total;
@@ -18,11 +31,13 @@ function render(s) {
     tile('Probable renewals', uniqT ? (100 * renewed / uniqT).toFixed(1) + '%' : '–', fmt(s.renew_exact_total) + ' exact · ' + fmt(s.renew_name_total) + ' name', 'renewals'),
     tile('Tracked names', fmt(s.tracker_names), fmtBytes(s.tracker_bytes), 'tracker'),
     tile('Process', fmtBytes(s.rss_bytes), fmtBytes(s.disk_bytes) + ' on disk', 'cost'),
+    ...dnsTiles(),
   );
   $('#tiles-note').textContent = 'Rates are 60-second averages. Last restart: ' + new Date(s.started_at_ms).toLocaleString('sv').slice(0, 16);
 }
 
 function drawStages(v) {
+  lastView = v;
   const t = v.totals;
   const sub = $('#stages-sub');
   clear(sub).append(frame.selectedOptions[0].textContent);
@@ -41,6 +56,11 @@ function drawStages(v) {
     row('Never-seen hostnames', 'Not seen since collection began', t.new_names),
     row('Never-seen domains', 'Registered domains not seen before', t.new_domains),
   );
+  if (dns && dns.enabled) {
+    host.append(h('hr', { class: 'split' }),
+      row('Names probed in DNS', 'Hostnames asked for A and AAAA when seen', t.dns_probed),
+      row('With an address', t.dns_probed ? share(t.dns_resolved, t.dns_probed) + ' had A or AAAA at once' : 'A or AAAA at the first probe', t.dns_resolved));
+  }
 }
 
 async function loadHistory() {
@@ -63,6 +83,15 @@ schedule();
 $('#stages-h').append(info('stages'));
 $('#keeping-h').append(info('keeping'));
 keepingCard($('#keeping'));
+$('#dns-h').append(info('dnshealth'));
+dnsHealthCard($('#dns-health'));
+// DNS fills in its tiles and stages when it arrives, without waiting for the next refresh.
+onDns((r) => {
+  const first = !dns;
+  dns = r;
+  if (first && lastSnap) render(lastSnap);
+  if (first && lastView) drawStages(lastView);
+});
 coverageSummary($('#coverage'));
 logTable($('#logs'), { onCount: (ok, all) => { $('#logsub').textContent = ok + ' of ' + all + ' healthy. Updates every 30 seconds.'; } });
 

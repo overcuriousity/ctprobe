@@ -803,5 +803,43 @@ async fn dns_probes_reach_sql_api_and_trends() {
     let cols: Vec<&str> = trend["columns"].as_array().unwrap().iter().map(|c| c.as_str().unwrap()).collect();
     let i = cols.iter().position(|c| *c == "resolved_pct").unwrap();
     assert_eq!(trend["rows"][0][i], 50.0);
+    assert_eq!(v["resolver"]["unreachable"], 0);
+    assert!(v["recent"].is_object());
+
+    // The Domain page lists each name's latest answer.
+    let d = get_json(format!("{}/api/domain?d=example.com", a.base)).await;
+    assert_eq!(d["dns_enabled"], true);
+    assert!(d["dns_error"].is_null(), "{}", d["dns_error"]);
+    let names = &d["dns_names"];
+    let col = |c: &str| names["columns"].as_array().unwrap().iter().position(|x| x == c).unwrap();
+    assert_eq!(names["rows"][0][col("name")], "a.example.com");
+    assert_eq!(names["rows"][0][col("v4")], serde_json::json!(["192.0.2.1"]));
+    assert!(names["rows"][0][col("first_address_ms")].is_number());
+
+    // The Certificate page finds the probes made for it by its hash.
+    let c = get_json(format!("{}/api/cert/0/0", a.base)).await;
+    let hash = c["cert_hash"].as_str().unwrap().to_string();
+    let q = format!("hash={hash}&at={}&names=a.example.com,gone.example.org", c["timestamp_ms"]);
+    let cd = get_json(format!("{}/api/dns/cert?{q}", a.base)).await;
+    let probes = cd["probes"]["rows"].as_array().unwrap();
+    assert_eq!(probes.len(), 2, "{cd}");
+    assert_eq!(probes[0][0], "a.example.com");
+    assert_eq!(probes[0][3], "resolved");
+    let bad = reqwest::get(format!("{}/api/dns/cert?hash=-1&at=0", a.base)).await.unwrap();
+    assert_eq!(bad.status(), 400);
+
+    // Search can filter by what DNS found.
+    let count = |f: &'static str| {
+        let base = a.base.clone();
+        async move {
+            let v = get_json(format!("{base}/api/certs?dns={f}")).await;
+            v["rows"].as_array().map(|r| r.len()).unwrap_or(usize::MAX)
+        }
+    };
+    assert_eq!(count("address").await, 1, "the certificate with a.example.com");
+    assert_eq!(count("no_address").await, 0, "the wildcard certificate has no plain names");
+    assert_eq!(count("ip_changed").await, 0);
+    let bad = reqwest::get(format!("{}/api/certs?dns=maybe", a.base)).await.unwrap();
+    assert_eq!(bad.status(), 400);
     a.pipe.shutdown().await.unwrap();
 }
