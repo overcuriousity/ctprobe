@@ -26,6 +26,10 @@ async fn app(entries: Vec<MockEntry>, hold: bool) -> App {
 }
 
 async fn app_on(log: MockLog) -> App {
+    app_with(log, Default::default()).await
+}
+
+async fn app_with(log: MockLog, dns: ctprobe::config::DnsConfig) -> App {
     let dir = tempfile::tempdir().unwrap();
     let cfg = Config {
         bind: "127.0.0.1:0".parse().unwrap(),
@@ -38,6 +42,7 @@ async fn app_on(log: MockLog) -> App {
         extra_log_lists: vec![],
         include_test_logs: false,
         coverage_target: 95.0,
+        dns,
     };
     let opts = PipelineOpts {
         logs: Some(vec![LogSpec {
@@ -62,6 +67,7 @@ async fn app_on(log: MockLog) -> App {
         nightly: false,
         snapshot_every: Duration::from_secs(86400),
         coverage_every: Duration::from_millis(100),
+        dns: ctprobe::dns::DnsOpts { minute: Duration::from_millis(100), ..Default::default() },
     };
     let pipe = Pipeline::start(cfg, opts).await.unwrap();
     let engine = Arc::new(QueryEngine::open(dir.path()).unwrap());
@@ -284,7 +290,7 @@ async fn cert_detail_fetches_from_mock_log() {
 #[tokio::test(flavor = "multi_thread")]
 async fn empty_store_renders() {
     let a = app(vec![], false).await;
-    for p in ["/", "/trends", "/search", "/sql", "/sizing", "/domain?d=example.com", "/cert?log=0&index=0", "/api/schema"] {
+    for p in ["/", "/trends", "/search", "/sql", "/sizing", "/dns", "/domain?d=example.com", "/cert?log=0&index=0", "/api/schema"] {
         assert_eq!(reqwest::get(format!("{}{p}", a.base)).await.unwrap().status(), 200, "{p}");
     }
     for m in web::trends::METRICS {
@@ -720,5 +726,82 @@ async fn a_complete_page_is_not_cut_short() {
     wait_rows(&a, 1).await;
     let v = get_json(format!("{}/api/certs?domain=example.com", a.base)).await;
     assert_eq!(v["cut_short"], false, "{v}");
+    a.pipe.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dns_is_off_without_resolvers() {
+    let a = app(vec![], true).await;
+    let v = get_json(format!("{}/api/dns", a.base)).await;
+    assert_eq!(v["enabled"], false);
+    let page = reqwest::get(format!("{}/dns", a.base)).await.unwrap().text().await.unwrap();
+    assert!(page.contains("id=\"first\"") && page.contains("/assets/dns.js"));
+    a.pipe.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dns_probes_reach_sql_api_and_trends() {
+    use ctprobe::dns::mock::{MockAnswer, MockDns};
+    let dns = MockDns::start().await;
+    dns.set("a.example.com", MockAnswer::addrs(&["192.0.2.1", "2001:db8::1"]));
+    let ca = TestCa::default();
+    let entries = vec![ca.final_cert(1, &["a.example.com", "gone.example.org"]), ca.final_cert(2, &["*.example.net"])];
+    let log = MockLog::start(MockOpts::rfc6962(0).with_entries(entries)).await;
+    let cfg = ctprobe::config::DnsConfig { resolver: Some(dns.addr()), ..Default::default() };
+    let a = app_with(log, cfg).await;
+    let url = format!(
+        "{}/api/sql?q={}",
+        a.base,
+        "SELECT%20name%2C%20status%2C%20v4%2C%20v6%2C%20reg_domain%20FROM%20dns%20WHERE%20attempt%20%3D%200%20AND%20kind%20%3D%20%27name%27%20ORDER%20BY%20name"
+    );
+    let rows = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let v = get_json(url.clone()).await;
+            if v["rows"].as_array().is_some_and(|r| r.len() >= 2) {
+                return v["rows"].clone();
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("probes did not become readable");
+    assert_eq!(rows[0][0], "a.example.com");
+    assert_eq!(rows[0][1], "resolved");
+    assert_eq!(rows[0][2], serde_json::json!(["192.0.2.1"]));
+    assert_eq!(rows[0][3], serde_json::json!(["2001:db8::1"]));
+    assert_eq!(rows[0][4], "example.com");
+    assert_eq!(rows[1][0], "gone.example.org");
+    assert_eq!(rows[1][1], "nxdomain");
+    // The live figures are republished four times a second.
+    let v = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let v = get_json(format!("{}/api/dns", a.base)).await;
+            if v["probes"].as_u64() == Some(4) {
+                return v;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("live DNS figures did not arrive");
+    assert_eq!(v["enabled"], true);
+    assert_eq!(v["names"]["first"]["probes"], 2);
+    assert_eq!(v["wildcards"]["first"]["probes"], 1);
+    assert_eq!(v["bases"]["first"]["probes"], 1);
+    assert_eq!(v["resolver"]["addr"], dns.addr().to_string());
+    let trend = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let v = get_json(format!("{}/api/trends/dns?hours=1&bucket=minute", a.base)).await;
+            if v["rows"].as_array().is_some_and(|r| !r.is_empty()) {
+                return v;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("dns_minute rows did not appear");
+    let cols: Vec<&str> = trend["columns"].as_array().unwrap().iter().map(|c| c.as_str().unwrap()).collect();
+    let i = cols.iter().position(|c| *c == "resolved_pct").unwrap();
+    assert_eq!(trend["rows"][0][i], 50.0);
     a.pipe.shutdown().await.unwrap();
 }

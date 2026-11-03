@@ -1,7 +1,8 @@
 use super::{expire, MEMORY, PARTITIONS};
 use crate::metrics::dir_size;
 use crate::store::{
-    certs_schema, list_day, register_files, rollup_minute_schema, session, sightings_schema,
+    certs_schema, dns_minute_schema, dns_schema, list_day, register_files, rollup_minute_schema,
+    session, sightings_schema,
 };
 use anyhow::{Context, Result};
 use arrow::datatypes::SchemaRef;
@@ -63,12 +64,14 @@ async fn compact_table(
 }
 
 pub async fn run(data: &Path, day: &str, budget: u64) -> Result<()> {
-    let need = dir_size(&data.join("certs").join(format!("day={day}")));
+    let need = ["certs", "dns"].iter().map(|t| dir_size(&data.join(t).join(format!("day={day}")))).max().unwrap_or(0);
     if free_bytes(data).is_some_and(|f| f < need) {
         expire::enforce(data, budget, Utc::now().date_naive())?;
     }
     compact_table(data, "certs", certs_schema(), day, "ORDER BY primary_domain NULLS LAST, seen_at", true).await?;
     compact_table(data, "sightings", sightings_schema(), day, "", false).await?;
     compact_table(data, "rollup_minute", rollup_minute_schema(), day, "", false).await?;
+    compact_table(data, "dns", dns_schema(), day, "ORDER BY name, probed_at", false).await?;
+    compact_table(data, "dns_minute", dns_minute_schema(), day, "ORDER BY minute", false).await?;
     Ok(())
 }

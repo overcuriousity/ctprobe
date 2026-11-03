@@ -40,6 +40,17 @@ const HELP = {
   capacity: 'What each log published and what we fetched over the range. A log that stays below its published rate falls further behind.',
   cost: 'Measured on this machine, so re-check on the target hardware. Disk figures fall after nightly compaction.',
   tracker: 'Names held in memory for renewal detection. It grows daily.',
+  dnsfirst: 'A and AAAA of each name, asked when its certificate is seen. Names seen before belong to probable renewals.',
+  dnslater: 'A name without an address is asked again on a schedule from its sighting, up to 30 days, until it resolves. It appeared between the last probe that missed and the first that found it.',
+  dnschanges: 'Any change counts a different address, alias or outcome. Only first probes are compared, against the last answer held for the name.',
+  dnsfamily: 'Of names that had addresses of this family both times, the share whose set of addresses differs.',
+  dnsreplaced: 'No address in common with the earlier answer. Counted where every earlier address is known; the first four IPv4 and two IPv6 addresses are kept.',
+  dnsnetwork: 'Ignores addresses rotating behind the same alias and, without an alias, within the same /24 or /48.',
+  dnsearlier: 'Mostly renewals and reissues, whose names last resolved on an earlier day.',
+  dnssameday: 'Mostly the same name in another certificate on the same day, such as from a second CA.',
+  dnswild: 'A wildcard asked as written finds a wildcard record if one exists. The covered name is asked only when the certificate does not list it too.',
+  dnsflow: 'Probing never slows ingest. A fixed sample of names, chosen by a hash of the name, is probed on every certificate. Names that do not fit the query budget in a burst are skipped and counted here.',
+  nxdomain: 'The resolver says the name does not exist.',
   validity: 'Certificate lifetime. Shorter limits take effect in March 2027 and March 2029, so the same sites will issue more often.',
 };
 function info(key) {

@@ -16,6 +16,7 @@ fn cfg() -> Config {
         extra_log_lists: vec![],
         include_test_logs: false,
         coverage_target: 95.0,
+        dns: Default::default(),
     }
 }
 

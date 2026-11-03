@@ -7,6 +7,7 @@
 
 use crate::config::Config;
 use crate::coverage;
+use crate::dns::{self, DnsLink, DnsOpts, DnsOut, DnsStats};
 use crate::fetch::{spawn_fetcher, Batch, FetchOpts, LogStats};
 use crate::history::{Counts, History};
 use crate::loghealth::{LogSample, LogWindow};
@@ -67,6 +68,7 @@ pub struct PipelineOpts {
     pub snapshot_every: Duration,
     /// Interval of the coverage assessment.
     pub coverage_every: Duration,
+    pub dns: DnsOpts,
 }
 
 impl Default for PipelineOpts {
@@ -80,6 +82,7 @@ impl Default for PipelineOpts {
             nightly: true,
             snapshot_every: Duration::from_secs(86400),
             coverage_every: Duration::from_secs(900),
+            dns: DnsOpts::default(),
         }
     }
 }
@@ -89,6 +92,8 @@ pub struct PipelineHandle {
     pub live: Arc<LiveState>,
     pub feed: broadcast::Sender<Arc<FeedItem>>,
     pub registry: Arc<Registry>,
+    /// Present while DNS probing is configured.
+    pub dns: Option<Arc<DnsStats>>,
 }
 
 const RUN: u8 = 0;
@@ -101,6 +106,7 @@ pub struct Pipeline {
     mode: Arc<AtomicU8>,
     thread: Option<std::thread::JoinHandle<Result<()>>>,
     coverage_thread: Option<std::thread::JoinHandle<()>>,
+    dns_thread: Option<std::thread::JoinHandle<()>>,
     tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
 
@@ -222,6 +228,14 @@ impl Pipeline {
         let (tx, rx) = mpsc::channel::<Batch>(CHANNEL_BATCHES);
         let (stop, stop_rx) = watch::channel(false);
         let tasks = Arc::new(Mutex::new(Vec::new()));
+        let (dns_link, dns_thread) = if cfg.dns.enabled() {
+            let (l, t) = dns::start(cfg.dns.clone(), opts.dns.clone(), &cfg.data_dir, stop.subscribe())?;
+            tracing::info!("probing names via the DNS resolver at {}", cfg.dns.resolver.map(|r| r.to_string()).unwrap_or_default());
+            (Some(l), Some(t))
+        } else {
+            (None, None)
+        };
+        let dns_stats = dns_link.as_ref().map(|l| l.stats.clone());
         let fleet = Arc::new(Fleet {
             client: client.clone(),
             tx,
@@ -305,6 +319,7 @@ impl Pipeline {
             queue_sum: 0.0,
             queue_ticks: 0,
             load: VecDeque::new(),
+            dns: dns_link,
             _fleet: fleet,
         };
         let thread = std::thread::Builder::new()
@@ -312,11 +327,12 @@ impl Pipeline {
             .spawn(move || ctx.run())?;
 
         Ok(Pipeline {
-            handle: PipelineHandle { live, feed, registry },
+            handle: PipelineHandle { live, feed, registry, dns: dns_stats },
             stop,
             mode,
             thread: Some(thread),
             coverage_thread: Some(coverage_thread),
+            dns_thread,
             tasks,
         })
     }
@@ -328,10 +344,11 @@ impl Pipeline {
             t.abort();
         }
         let coverage = self.coverage_thread.take();
+        let dns = self.dns_thread.take();
         let thread = self.thread.take().ok_or_else(|| anyhow!("already stopped"))?;
         tokio::task::spawn_blocking(move || {
-            if let Some(c) = coverage {
-                let _ = c.join();
+            for t in [coverage, dns].into_iter().flatten() {
+                let _ = t.join();
             }
             thread.join()
         })
@@ -472,6 +489,7 @@ struct Worker {
     queue_ticks: u32,
     /// Busy and queue percentages of recent samples.
     load: VecDeque<(f64, f64)>,
+    dns: Option<DnsLink>,
     _fleet: Arc<Fleet>,
 }
 
@@ -504,6 +522,7 @@ impl Worker {
                     Err(_) => {}
                 }
             }
+            self.drain_dns();
             if last_ping.elapsed() >= WATCHDOG_PING {
                 // From this loop, so a hung pipeline stops pinging and is restarted.
                 let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Watchdog]);
@@ -539,6 +558,7 @@ impl Worker {
                 self.tracker.commit_wal(self.epoch)
             }
             _ => {
+                self.drain_dns();
                 self.emit_minute();
                 self.commit()
             }
@@ -585,6 +605,9 @@ impl Worker {
                 *feed_budget -= 1;
                 let _ = self.feed.send(Arc::new(FeedItem::from_row(&row)));
             }
+            if let Some(d) = &self.dns {
+                d.submit(&row);
+            }
             self.writer.push_cert(row);
         }
         if bad > 0 {
@@ -595,6 +618,17 @@ impl Worker {
             }
         }
         self.done.insert(batch.log, batch.next);
+    }
+
+    /// Moves finished probes into the writer, so they commit with the rest.
+    fn drain_dns(&mut self) {
+        let Some(d) = &self.dns else { return };
+        while let Ok(o) = d.out.try_recv() {
+            match o {
+                DnsOut::Row(r) => self.writer.push_dns(r),
+                DnsOut::Minute(m) => self.writer.push_dns_minute(m),
+            }
+        }
     }
 
     fn tick_second(&mut self) {

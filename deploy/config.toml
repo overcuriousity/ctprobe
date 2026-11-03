@@ -1,6 +1,7 @@
 # Test host. On the 8 CPU, 64 GiB RAM, 256 GiB HDD target use:
 #   disk_budget = "230GiB"
 #   tracker_max = "32GiB"
+#   and under [dns]: state_max = "8GiB"
 # No login or TLS: use another address only on a protected network.
 bind = "127.0.0.1:8080"
 data_dir = "/var/lib/ctprobe"
