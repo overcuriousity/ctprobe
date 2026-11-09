@@ -40,7 +40,7 @@ fst = { version = "0.4", features = ["levenshtein"] }
 strsim = "0.11"
 chrono = { version = "0.4", features = ["serde"] }
 datafusion = "55"
-arrow = "59"
+arrow = "60"
 parquet = { version = "59", features = ["arrow", "zstd"] }
 sqlparser = "0.62"
 memmap2 = "0.9"
