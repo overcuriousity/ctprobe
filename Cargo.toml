@@ -35,7 +35,7 @@ hashbrown = "0.15"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 hdrhistogram = "7"
 rayon = "1"
-redb = "2"
+redb = "4"
 fst = { version = "0.4", features = ["levenshtein"] }
 strsim = "0.11"
 chrono = { version = "0.4", features = ["serde"] }
