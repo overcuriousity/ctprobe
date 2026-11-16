@@ -34,8 +34,9 @@ The existing `/api/*` must not change, because the pipeline reads it.
 
 ## Anti-goals
 
-- Any change to the status, headers, keys or value types of an existing
-  `/api/*` response, including additive keys.
+- An unnoticed change to an existing `/api/*` response. The project is a proof
+  of concept, so deliberate changes are allowed; the contract tests exist to
+  make every change a visible, intended one.
 - Archive queries slowing down the existing endpoints.
 - Silent loss of a day that was never archived.
 

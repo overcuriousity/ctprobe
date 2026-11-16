@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- No existing `/api/*` response may change in status, headers, keys or value types, including additive keys. `tests/contract.rs` (Task 1) must pass after every task.
+- The project is a proof of concept, so `/api/*` is not frozen (owner's ruling after approval). `tests/contract.rs` (Task 1) is a regression net: it must pass after every task, and a deliberate change to an existing response updates its literal in the same commit and is named in the commit message. No task in this plan needs such a change.
 - With `hot_days`, `dns_days` and `archive_budget` all unset, behaviour is exactly as today and no `archive/` directory is created.
 - Nothing under `<data>/archive/` is ever deleted by the program.
 - Archive files are written to `<name>.tmp` and renamed; zstd level 6; row groups of 1,000,000 rows; bloom filter on `reg_domain`.
