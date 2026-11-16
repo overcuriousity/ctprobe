@@ -227,14 +227,21 @@ How rows are found, newest day first, stopping when the page is full:
   and `entry_index` for `detail`.
 
 With the archive disabled, every day is a scan, so long ranges are slow.
-When the time limit ends the walk with rows in hand, the response carries
-them with `cut_short: true` and a `next_cursor` to continue from.
+Only days within the index's `first_seen` and `last_seen` of a searched
+domain are walked, plus the days without the `domains` marker, which the
+index does not cover yet.
+When the time limit ends the walk, the response is a 200 with the rows found,
+possibly none, `cut_short: true` and a `next_cursor` that continues after the
+last row, or after the last day the walk read to its end. The cursor format
+does not change: a position between two days is a cursor value too.
 
 **`GET /api/v1/domain/{domain}`**
 For one registered domain: `first_seen`, `last_seen`, `cert_count` from the
 index, and `dns`: the address history from hot `dns` and `archive/dns`
 merged, each row `{ tier, name, probed_at, status, v4, v6 }`, newest first,
-`limit` and `cursor` as above. An archived day is read from the archive only.
+`limit` and `cursor` as above. The walk reads days from the summary's
+`first_seen` on, since probes can follow the last cert by weeks, plus days
+without the `domains` marker; with no summary, only those. An archived day is read from the archive only.
 A day not yet archived is read from hot `dns` and reduced by the archive's
 rule at query time, so a day's rows do not change when it is archived.
 
@@ -255,7 +262,11 @@ There is no `cert/{sha256}`. A certificate is identified by `log_id` and
   `names::registered_domain`; anything that fails is a 400. A leading `*.` is
   dropped. `limit` out of range, a malformed `cursor`, a bad date and an
   unknown `mode` are 400s, not clamped.
-- **Timeout:** 504 only when the time limit passes with no rows found.
+- **Timeout:** 504 only when the time limit passes before the walk has
+  finished one day and with no rows found, or before the fuzzy search or
+  summary lookup ends. Otherwise a cut-short page always moves the cursor on,
+  so following `next_cursor` cannot loop. `/domain` with a summary in hand
+  answers 200 even then, with the cursor it was given.
 
 ### Contract tests
 

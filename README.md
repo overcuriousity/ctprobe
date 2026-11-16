@@ -99,9 +99,12 @@ A request that finds no free slot is refused at once with 429 and `Retry-After: 
 Two requests run at once, and only one of them may read the archive.
 
 `limit` is 1 to 1000, default 100, and a value outside that is a 400. Follow `next_cursor` until it is null.
-`cut_short: true` means the time limit ended the walk: `next_cursor` is then always set and continues it. A walk
-that found no rows is a 504, except for `/domain` with a summary, which answers 200 with empty `rows`,
-`cut_short: true` and a cursor to retry from.
+`cut_short: true` means the time limit ended the walk: `next_cursor` is then always set and continues after the
+last row, or after the last day the walk read to its end, so a page can be empty and still move on. Only a walk that
+finished no day and found no row is a 504; for `/domain` with a summary it is a 200 with empty `rows`,
+`cut_short: true` and a cursor to retry from. The walk reads only the days within the index's first and last
+sighting of a searched domain (for `/domain`, from its first sighting on), plus the days the nightly job has not
+finished.
 
 Each row has a `tier`: `hot` while its day is still in the hot tier, `archive` once only the archive holds it.
 Certificate rows from `hot` also carry `detail`. DNS rows are the archive's reduction: each name's first answer

@@ -4,7 +4,7 @@
 //! day's rows do not change when it is archived.
 
 use super::days::{columns, objects};
-use super::walk::{day_bounds, DayFetch, Days, Got, Left};
+use super::walk::{day_bounds, Bound, DayFetch, Days, Got, Left};
 use super::{TierPage, BASE64};
 use crate::nightly::archive::DNS_CHANGES_SQL;
 use crate::query::sql::{quote, MS_PER_DAY};
@@ -38,6 +38,12 @@ impl DnsCursor {
     /// A cursor before every row: a page that starts here starts at the newest.
     pub fn start() -> DnsCursor {
         DnsCursor { probed_at_ms: i64::MAX, name: String::new() }
+    }
+
+    /// A position after every row of `day` and before every row of the day
+    /// before: its last millisecond, before every name.
+    fn after_day(day: i64) -> DnsCursor {
+        DnsCursor { probed_at_ms: day * MS_PER_DAY - 1, name: String::new() }
     }
 
     fn of(r: &Value) -> DnsCursor {
@@ -97,6 +103,10 @@ impl DayFetch for DnsFetch<'_> {
         c.day()
     }
 
+    fn after_day(day: i64) -> DnsCursor {
+        DnsCursor::after_day(day)
+    }
+
     fn first(c: DnsCursor) -> DnsCursor {
         c
     }
@@ -134,30 +144,31 @@ impl QueryEngine {
     }
 
     /// One page of address history for `reg_domain`, newest first, after
-    /// `after`.
+    /// `after`, on the days `bound` allows.
     pub async fn tier_dns(
         &self,
         reg_domain: &str,
         limit: usize,
         after: Option<DnsCursor>,
+        bound: &Bound,
         deadline: Instant,
     ) -> Result<TierPage, QueryError> {
         let mut left = || deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero());
-        self.walk_dns(reg_domain, limit, after, &mut left).await
+        self.walk_dns(&DnsFetch { engine: self, reg: reg_domain }, limit, after, bound, &mut left).await
     }
 
     /// The walk behind `tier_dns`. `left` gives the time remaining, or `None`
     /// once the deadline has passed.
-    async fn walk_dns(
+    async fn walk_dns<F: DayFetch>(
         &self,
-        reg: &str,
+        fetch: &F,
         limit: usize,
-        after: Option<DnsCursor>,
+        after: Option<F::Cursor>,
+        bound: &Bound,
         left: Left<'_>,
     ) -> Result<TierPage, QueryError> {
-        let days = Days { table: "dns", ts: "probed_at", from: None, to: None, skip: false };
-        let fetch = DnsFetch { engine: self, reg };
-        self.walk_days(&fetch, days, limit, after, left).await
+        let days = Days { table: "dns", ts: "probed_at", from: None, to: None, bound, skip: false };
+        self.walk_days(fetch, days, limit, after, left).await
     }
 
     /// One day from its archive file, outside the limiter. The day is `hot`
@@ -213,6 +224,7 @@ mod tests {
     use crate::dns::outcome::{Lookup, Status};
     use crate::dns::queue::Kind;
     use crate::dns::DnsRow;
+    use crate::query::tiers::walk::Counting;
     use crate::store::Writer;
 
     #[test]
@@ -260,11 +272,27 @@ mod tests {
         w.publish(1).unwrap();
         let e = QueryEngine::open(dir.path()).unwrap();
         let far = Instant::now() + Duration::from_secs(30);
-        let plain = e.tier_dns("one.com", 10, None, far).await.unwrap();
+        let plain = e.tier_dns("one.com", 10, None, &none(), far).await.unwrap();
         let start = DnsCursor::decode(&DnsCursor::start().encode()).unwrap();
-        let from_start = e.tier_dns("one.com", 10, Some(start), far).await.unwrap();
+        let from_start = e.tier_dns("one.com", 10, Some(start), &none(), far).await.unwrap();
         assert_eq!(plain.rows.len(), 2);
         assert_eq!(plain.rows, from_start.rows);
+    }
+
+    fn none() -> Bound {
+        Bound::dns(None)
+    }
+
+    /// One page of `one.com` on a scripted clock, and the days it read.
+    async fn walk(
+        e: &QueryEngine,
+        after: Option<DnsCursor>,
+        bound: &Bound,
+        left: Left<'_>,
+    ) -> (Result<TierPage, QueryError>, Vec<i64>) {
+        let fetch = Counting::new(DnsFetch { engine: e, reg: "one.com" });
+        let page = e.walk_dns(&fetch, 10, after, bound, left).await;
+        (page, fetch.take())
     }
 
     /// A clock with time for the first `n` asks and none after.
@@ -289,18 +317,81 @@ mod tests {
         w.flush(1).unwrap();
         w.publish(1).unwrap();
         let e = QueryEngine::open(dir.path()).unwrap();
-        let p = e.walk_dns("one.com", 10, None, &mut clock(2)).await.unwrap();
+        let p = walk(&e, None, &none(), &mut clock(2)).await.0.unwrap();
         assert!(p.cut_short);
         assert_eq!(p.rows.len(), 1);
         assert_eq!(p.rows[0]["v4"], serde_json::json!(["2.2.2.2"]));
         let c = DnsCursor::decode(p.next_cursor.as_deref().unwrap()).unwrap();
         let far = Instant::now() + Duration::from_secs(30);
-        let rest = e.tier_dns("one.com", 10, Some(c), far).await.unwrap();
+        let rest = e.tier_dns("one.com", 10, Some(c), &none(), far).await.unwrap();
         assert!(!rest.cut_short && rest.next_cursor.is_none());
         assert_eq!(rest.rows.len(), 1);
         assert_eq!(rest.rows[0]["v4"], serde_json::json!(["1.1.1.1"]));
 
-        assert!(matches!(e.walk_dns("one.com", 10, None, &mut clock(0)).await, Err(QueryError::Timeout)));
-        assert!(matches!(e.walk_dns("one.com", 10, None, &mut clock(1)).await, Err(QueryError::Timeout)));
+        assert!(matches!(walk(&e, None, &none(), &mut clock(0)).await.0, Err(QueryError::Timeout)));
+        assert!(matches!(walk(&e, None, &none(), &mut clock(1)).await.0, Err(QueryError::Timeout)));
+    }
+
+    /// Days with probes of other domains only, then one with the domain: an
+    /// empty page cut short continues after the last day it finished.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cut_short_page_without_rows_makes_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = 20_000;
+        let mut w = Writer::open(dir.path(), 0).unwrap();
+        w.push_dns(probe(d * MS_PER_DAY + 5, "1.1.1.1"));
+        for i in 1..=3 {
+            let mut p = probe((d + i) * MS_PER_DAY + 5, "2.2.2.2");
+            p.name = "www.other.com".into();
+            p.reg_domain = Some("other.com".into());
+            w.push_dns(p);
+        }
+        w.flush(1).unwrap();
+        w.publish(1).unwrap();
+        let e = QueryEngine::open(dir.path()).unwrap();
+        let (p, read) = walk(&e, None, &none(), &mut clock(3)).await;
+        let p = p.unwrap();
+        assert!(p.rows.is_empty() && p.cut_short);
+        assert_eq!(read, vec![d + 3, d + 2]);
+        let c = DnsCursor::decode(p.next_cursor.as_deref().unwrap()).unwrap();
+        assert_ne!(c, DnsCursor::start());
+        let (p, rest) = walk(&e, Some(c), &none(), &mut clock(100)).await;
+        let p = p.unwrap();
+        assert_eq!(rest, vec![d + 1, d]);
+        assert_eq!(p.rows.len(), 1);
+        assert!(!p.cut_short && p.next_cursor.is_none());
+    }
+
+    /// Days the index covers are read from the domain's first day on; days
+    /// before it only when the index does not cover them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_first_seen_day_bounds_the_walk_from_below() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = 20_000;
+        let mut w = Writer::open(dir.path(), 0).unwrap();
+        for i in 0..4 {
+            w.push_dns(probe((d + i) * MS_PER_DAY + 5, "1.1.1.1"));
+        }
+        w.flush(1).unwrap();
+        w.publish(1).unwrap();
+        std::fs::create_dir_all(dir.path().join("nightly")).unwrap();
+        for i in 0..3 {
+            let name = crate::store::day_string((d + i) * MS_PER_DAY);
+            std::fs::write(dir.path().join("nightly").join(format!("{name}.domains")), b"").unwrap();
+        }
+        let e = QueryEngine::open(dir.path()).unwrap();
+        let hit = crate::query::DomainHit {
+            domain: "one.com".into(),
+            score: 1.0,
+            first_seen_ms: (d + 1) * MS_PER_DAY,
+            last_seen_ms: (d + 1) * MS_PER_DAY,
+            cert_count: 1,
+        };
+        let (p, read) = walk(&e, None, &Bound::dns(Some(&hit)), &mut clock(100)).await;
+        assert_eq!(read, vec![d + 3, d + 2, d + 1]);
+        assert_eq!(p.unwrap().rows.len(), 3);
+        let (p, read) = walk(&e, None, &Bound::dns(None), &mut clock(100)).await;
+        assert_eq!(read, vec![d + 3], "only the day the index does not cover");
+        assert_eq!(p.unwrap().rows.len(), 1);
     }
 }

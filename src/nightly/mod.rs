@@ -23,6 +23,20 @@ fn step_done(data: &Path, day: &str, step: &str) -> bool {
     marker(data, day, step).exists()
 }
 
+/// The days whose `step` is done, from one listing of the marker directory.
+pub fn days_done(data: &Path, step: &str) -> Vec<NaiveDate> {
+    let suffix = format!(".{step}");
+    std::fs::read_dir(data.join("nightly"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            NaiveDate::parse_from_str(n.strip_suffix(&suffix)?, "%Y-%m-%d").ok()
+        })
+        .collect()
+}
+
 fn mark(data: &Path, day: &str, step: &str) -> Result<()> {
     let p = marker(data, day, step);
     std::fs::create_dir_all(p.parent().unwrap())?;

@@ -523,6 +523,34 @@ async fn timeout_without_rows_is_504() {
     assert_eq!(code(&b), "timeout");
 }
 
+/// Years of archived days the index covers, as files no reader could open:
+/// a walk that read one would fail with a 500.
+fn junk_archive(a: &App, table: &str, days: std::ops::Range<i64>) {
+    let dir = a._dir.path();
+    std::fs::create_dir_all(dir.join("archive").join(table)).unwrap();
+    std::fs::create_dir_all(dir.join("nightly")).unwrap();
+    for day in days {
+        let name = chrono::DateTime::from_timestamp_millis(day * DAY_MS).unwrap().format("%Y-%m-%d").to_string();
+        std::fs::write(dir.join("archive").join(table).join(format!("{name}.parquet")), b"junk").unwrap();
+        std::fs::write(dir.join("nightly").join(format!("{name}.domains")), b"").unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_domain_the_index_never_saw_reads_no_archive_day() {
+    let a = app_with(Setup { certs: vec![two_domain_cert()], archive: vec![D], ..Default::default() }).await;
+    junk_archive(&a, "certs", 18_000..19_000);
+    junk_archive(&a, "dns", 18_000..19_000);
+    let p = page(&a, "/api/v1/certs?domain=never-seen.com").await;
+    assert!(p["rows"].as_array().unwrap().is_empty() && p["next_cursor"].is_null() && p["cut_short"] == false, "{p}");
+    let p = page(&a, "/api/v1/certs?q=never-seen.com&mode=levenshtein").await;
+    assert!(p["rows"].as_array().unwrap().is_empty() && p["next_cursor"].is_null(), "{p}");
+    let (s, _, b) = get(&a, "/api/v1/domain/never-seen.com").await;
+    assert_eq!(s, 404, "{b}");
+    // The domain the index knows is still found on its archived day.
+    assert_eq!(rows(&a, "/api/v1/certs?domain=two.org").await.len(), 1);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn certs_takes_the_archive_permit_when_there_is_an_archive() {
     let a = app_with(Setup { certs: vec![two_domain_cert()], archive: vec![D], ..Default::default() }).await;
@@ -565,6 +593,13 @@ fn changing_name() -> Vec<DnsRow> {
         probe("www.example.com", D + 2000, &["1.1.1.1"]),
         probe("www.example.com", D + 3000, &["2.2.2.2"]),
     ]
+}
+
+/// Probes and the certificate on day `D` they follow, with `archive` days
+/// archived. The index then knows the domain, so the walk reads its
+/// archived days.
+fn probed(dns: Vec<DnsRow>, archive: Vec<i64>) -> Setup {
+    Setup { certs: vec![cert(100, &["www.example.com"], D + 10)], dns, archive, ..Default::default() }
 }
 
 fn dns_dir(a: &App, ms: i64) -> std::path::PathBuf {
@@ -621,7 +656,7 @@ async fn dns_only_domain_has_null_summary() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn dns_rows_same_before_and_after_archiving() {
-    let a = app_with(Setup { dns: changing_name(), archive: vec![D], ..Default::default() }).await;
+    let a = app_with(probed(changing_name(), vec![D])).await;
     let hot = dns_rows(&page(&a, "/api/v1/domain/example.com").await);
     assert_eq!(hot.len(), 2, "{hot:?}");
     assert!(hot.iter().all(|r| r["tier"] == "hot"), "{hot:?}");
@@ -641,15 +676,15 @@ async fn dns_rows_same_before_and_after_archiving() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn unarchived_dns_day_matches_the_archive() {
-    let archived = app_with(Setup { dns: changing_name(), archive: vec![D], ..Default::default() }).await;
-    let scanned = app_with(Setup { dns: changing_name(), ..Default::default() }).await;
+    let archived = app_with(probed(changing_name(), vec![D])).await;
+    let scanned = app_with(probed(changing_name(), vec![])).await;
     let p = "/api/v1/domain/example.com";
     assert_eq!(dns_rows(&page(&scanned, p).await), dns_rows(&page(&archived, p).await));
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn archived_day_is_read_from_archive_only() {
-    let a = app_with(Setup { dns: changing_name(), archive: vec![D], ..Default::default() }).await;
+    let a = app_with(probed(changing_name(), vec![D])).await;
     // The hot files are still there: reading both would give four rows.
     assert!(dns_dir(&a, D).exists());
     let rs = dns_rows(&page(&a, "/api/v1/domain/example.com").await);
@@ -660,7 +695,7 @@ async fn archived_day_is_read_from_archive_only() {
 async fn other_domains_names_are_not_mixed_in() {
     let mut dns = changing_name();
     dns.push(probe("www.other.org", D + 1500, &["9.9.9.9"]));
-    let a = app_with(Setup { dns, archive: vec![D], ..Default::default() }).await;
+    let a = app_with(probed(dns, vec![D])).await;
     let rs = dns_rows(&page(&a, "/api/v1/domain/example.com").await);
     assert!(rs.iter().all(|r| r["name"] == "www.example.com"), "{rs:?}");
 }
@@ -677,7 +712,7 @@ async fn dns_paging_returns_every_row_once() {
     // Day D+1 (hot only).
     dns.push(probe(&n("a"), D + DAY_MS + 100, &["1.1.1.3"]));
     dns.push(probe(&n("d"), D + DAY_MS + 100, &["1.1.1.4"]));
-    let a = app_with(Setup { dns, archive: vec![D], ..Default::default() }).await;
+    let a = app_with(probed(dns, vec![D])).await;
     let all = dns_rows(&page(&a, "/api/v1/domain/example.com?limit=100").await);
     assert_eq!(all.len(), 6, "{all:?}");
     let order: Vec<(i64, String)> = all.iter().map(|r| (r["probed_at"].as_i64().unwrap(), r["name"].as_str().unwrap().into())).collect();

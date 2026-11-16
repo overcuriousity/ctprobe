@@ -12,12 +12,15 @@ use crate::store::list_archive;
 use base64::Engine;
 use days::Start;
 pub use dns::DnsCursor;
+pub use walk::Bound;
 use serde::Serialize;
 use serde_json::Value;
 use std::cmp::Reverse;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use walk::{DayFetch, Days, Got, Left};
+#[cfg(test)]
+use walk::Counting;
 
 const BASE64: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
 const WILDCARD_RE: &str = r"'(^| )\*\.'";
@@ -72,6 +75,12 @@ impl CertCursor {
 
     fn day(&self) -> i64 {
         self.seen_at_ms.div_euclid(MS_PER_DAY)
+    }
+
+    /// A position after every row of `day` and before every row of the day
+    /// before: its last millisecond with the highest log and index.
+    fn after_day(day: i64) -> CertCursor {
+        CertCursor { seen_at_ms: day * MS_PER_DAY - 1, log_id: i32::MAX, entry_index: i64::MAX, reg_domain: String::new() }
     }
 
     /// Rows after this one in page order. `tail` decides rows of the same
@@ -154,8 +163,10 @@ impl QueryEngine {
         !list_archive(&self.data, "certs").is_empty()
     }
 
-    /// One page of rows for `domains`, newest first, after `after`. With
-    /// `exact_name`, only rows listing that name or the wildcard covering it.
+    /// One page of rows for `domains`, newest first, after `after`, on the
+    /// days `bound` allows. With `exact_name`, only rows listing that name or
+    /// the wildcard covering it.
+    #[allow(clippy::too_many_arguments)]
     pub async fn tier_certs(
         &self,
         domains: &[String],
@@ -163,24 +174,18 @@ impl QueryEngine {
         f: &TierFilter,
         limit: usize,
         after: Option<CertCursor>,
+        bound: &Bound,
         deadline: Instant,
     ) -> Result<TierPage, QueryError> {
         let mut left = || deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero());
-        self.walk(domains, exact_name, f, limit, after, &mut left).await
+        let scope = Scope::new(domains, exact_name, f);
+        self.walk_days(&CertFetch { engine: self, scope: &scope }, scope.days(bound), limit, after, &mut left).await
     }
+}
 
-    /// The walk behind `tier_certs`. `left` gives the time remaining, or
-    /// `None` once the deadline has passed.
-    async fn walk(
-        &self,
-        domains: &[String],
-        exact_name: Option<&str>,
-        f: &TierFilter,
-        limit: usize,
-        after: Option<CertCursor>,
-        left: &mut (dyn FnMut() -> Option<Duration> + Send),
-    ) -> Result<TierPage, QueryError> {
-        let scope = Scope {
+impl<'a> Scope<'a> {
+    fn new(domains: &[String], exact_name: Option<&'a str>, f: &'a TierFilter) -> Scope<'a> {
+        Scope {
             domains: domains
                 .iter()
                 .filter(|d| f.tld.as_deref().is_none_or(|t| psl::suffix_str(d) == Some(t)))
@@ -188,9 +193,12 @@ impl QueryEngine {
                 .collect(),
             exact: exact_name.map(|n| (n, format!("*.{}", n.split_once('.').map_or(n, |(_, p)| p)))),
             f,
-        };
-        let days = Days { table: "certs", ts: "seen_at", from: f.from_ms, to: f.to_ms, skip: scope.domains.is_empty() };
-        self.walk_days(&CertFetch { engine: self, scope: &scope }, days, limit, after, left).await
+        }
+    }
+
+    /// The days the certificate walk lists.
+    fn days<'b>(&self, bound: &'b Bound) -> Days<'b> {
+        Days { table: "certs", ts: "seen_at", from: self.f.from_ms, to: self.f.to_ms, bound, skip: self.domains.is_empty() }
     }
 }
 
@@ -214,6 +222,10 @@ impl DayFetch for CertFetch<'_> {
 
     fn day(c: &CertCursor) -> i64 {
         c.day()
+    }
+
+    fn after_day(day: i64) -> CertCursor {
+        CertCursor::after_day(day)
     }
 
     fn first(c: CertCursor) -> Start {
@@ -305,6 +317,26 @@ mod tests {
         Instant::now() + Duration::from_secs(30)
     }
 
+    fn none() -> Bound {
+        Bound::certs(&[])
+    }
+
+    /// One page as `tier_certs` gives it, on a scripted clock, and the days
+    /// it read.
+    async fn walk(
+        e: &QueryEngine,
+        domains: &[String],
+        f: &TierFilter,
+        after: Option<CertCursor>,
+        bound: &Bound,
+        left: &mut (dyn FnMut() -> Option<Duration> + Send),
+    ) -> (Result<TierPage, QueryError>, Vec<i64>) {
+        let scope = Scope::new(domains, None, f);
+        let fetch = Counting::new(CertFetch { engine: e, scope: &scope });
+        let page = e.walk_days(&fetch, scope.days(bound), 10, after, left).await;
+        (page, fetch.take())
+    }
+
     /// The deadline passes after the first day's query (asks: the listing,
     /// then the query): the rows of that day come back cut short, and the
     /// cursor reaches the next day.
@@ -320,18 +352,18 @@ mod tests {
         let e = QueryEngine::open(dir.path()).unwrap();
         let domains = ["one.com".to_string()];
         let f = TierFilter::default();
-        let p = e.walk(&domains, None, &f, 10, None, &mut clock(2)).await.unwrap();
+        let p = walk(&e, &domains, &f, None, &none(), &mut clock(2)).await.0.unwrap();
         assert!(p.cut_short);
         assert_eq!(p.rows.len(), 1);
         assert_eq!(p.rows[0]["entry_index"], 2);
         let c = CertCursor::decode(p.next_cursor.as_deref().unwrap()).unwrap();
-        let rest = e.tier_certs(&domains, None, &f, 10, Some(c), far()).await.unwrap();
+        let rest = e.tier_certs(&domains, None, &f, 10, Some(c), &none(), far()).await.unwrap();
         assert!(!rest.cut_short && rest.next_cursor.is_none());
         assert_eq!(rest.rows.len(), 1);
         assert_eq!(rest.rows[0]["entry_index"], 1);
 
-        assert!(matches!(e.walk(&domains, None, &f, 10, None, &mut clock(0)).await, Err(QueryError::Timeout)));
-        assert!(matches!(e.walk(&domains, None, &f, 10, None, &mut clock(1)).await, Err(QueryError::Timeout)));
+        assert!(matches!(walk(&e, &domains, &f, None, &none(), &mut clock(0)).await.0, Err(QueryError::Timeout)));
+        assert!(matches!(walk(&e, &domains, &f, None, &none(), &mut clock(1)).await.0, Err(QueryError::Timeout)));
     }
 
     /// The deadline passes before the hot detail of an archived, still hot day
@@ -350,17 +382,172 @@ mod tests {
         let e = QueryEngine::open(dir.path()).unwrap();
         let domains = ["one.com".to_string()];
         let f = TierFilter::default();
-        let p = e.walk(&domains, None, &f, 10, None, &mut clock(2)).await.unwrap();
+        let p = walk(&e, &domains, &f, None, &none(), &mut clock(2)).await.0.unwrap();
         assert!(p.cut_short);
         assert_eq!(p.rows.len(), 2);
         assert!(p.rows.iter().all(|r| r["tier"] == "hot" && r.get("detail").is_none()), "{:?}", p.rows);
         let c = CertCursor::decode(p.next_cursor.as_deref().unwrap()).unwrap();
         assert_eq!(c.entry_index, 1);
-        let rest = e.tier_certs(&domains, None, &f, 10, Some(c), far()).await.unwrap();
+        let rest = e.tier_certs(&domains, None, &f, 10, Some(c), &none(), far()).await.unwrap();
         assert!(rest.rows.is_empty() && !rest.cut_short && rest.next_cursor.is_none());
 
-        let full = e.walk(&domains, None, &f, 10, None, &mut clock(3)).await.unwrap();
+        let full = walk(&e, &domains, &f, None, &none(), &mut clock(3)).await.0.unwrap();
         assert!(!full.cut_short);
         assert!(full.rows.iter().all(|r| r["tier"] == "hot" && r["detail"]["key_type"].is_string()), "{:?}", full.rows);
+    }
+
+    fn other(index: u64, seen: i64) -> CertRow {
+        let mut c = cert(index, seen);
+        c.parsed.names = vec!["a.other.com".into()];
+        c.reg_domains = vec!["other.com".into()];
+        c.primary_domain = Some("other.com".into());
+        c
+    }
+
+    /// Three days without a row for the domain, then one with it. A page cut
+    /// short before the row is empty but continues after the last day it
+    /// finished, and no day is read twice.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cut_short_page_without_rows_makes_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = 20_000;
+        let mut w = Writer::open(dir.path(), 0).unwrap();
+        w.push_cert(cert(1, d * MS_PER_DAY + 5));
+        for i in 1..=3 {
+            w.push_cert(other(10 + i as u64, (d + i) * MS_PER_DAY + 5));
+        }
+        w.flush(1).unwrap();
+        w.publish(1).unwrap();
+        let e = QueryEngine::open(dir.path()).unwrap();
+        let domains = ["one.com".to_string()];
+        let f = TierFilter::default();
+        // Asks: the listing, then two days.
+        let (p, read) = walk(&e, &domains, &f, None, &none(), &mut clock(3)).await;
+        let p = p.unwrap();
+        assert!(p.rows.is_empty() && p.cut_short, "{:?}", p.rows);
+        assert_eq!(read, vec![d + 3, d + 2]);
+        let c1 = CertCursor::decode(p.next_cursor.as_deref().unwrap()).unwrap();
+        // From that cursor, with time for one day: empty again, further on.
+        let (p, again) = walk(&e, &domains, &f, Some(c1.clone()), &none(), &mut clock(2)).await;
+        let p = p.unwrap();
+        assert!(p.rows.is_empty() && p.cut_short);
+        assert_eq!(again, vec![d + 1]);
+        let c2 = CertCursor::decode(p.next_cursor.as_deref().unwrap()).unwrap();
+        assert_ne!(c2, c1, "an empty page must not hand back the request's cursor");
+        let (p, rest) = walk(&e, &domains, &f, Some(c2), &none(), &mut clock(100)).await;
+        let p = p.unwrap();
+        assert_eq!(rest, vec![d]);
+        assert!(!p.cut_short && p.next_cursor.is_none());
+        assert_eq!(p.rows.len(), 1);
+        assert_eq!(p.rows[0]["entry_index"], 1);
+        // Time for no day at all from a cursor is still a timeout.
+        let c = CertCursor::decode(&CertCursor::after_day(d + 1).encode()).unwrap();
+        assert!(matches!(walk(&e, &domains, &f, Some(c), &none(), &mut clock(1)).await.0, Err(QueryError::Timeout)));
+    }
+
+    /// The position after a day lies after each of its rows and before each
+    /// row of the day before, in SQL and in Rust.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn after_day_lies_between_days() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = 20_000;
+        let mut w = Writer::open(dir.path(), 0).unwrap();
+        for (i, t) in [d * MS_PER_DAY, (d + 1) * MS_PER_DAY - 1, (d + 1) * MS_PER_DAY, (d + 2) * MS_PER_DAY - 1].into_iter().enumerate() {
+            w.push_cert(cert(i as u64, t));
+        }
+        w.flush(1).unwrap();
+        w.publish(1).unwrap();
+        crate::nightly::archive::certs(dir.path(), "2024-10-04", u64::MAX).await.unwrap();
+        let e = QueryEngine::open(dir.path()).unwrap();
+        let domains = ["one.com".to_string()];
+        let f = TierFilter::default();
+        let c = CertCursor::after_day(d + 1);
+        assert_eq!(c.day(), d);
+        let p = e.tier_certs(&domains, None, &f, 10, Some(c), &none(), far()).await.unwrap();
+        let mut got: Vec<i64> = p.rows.iter().map(|r| r["entry_index"].as_i64().unwrap()).collect();
+        got.sort();
+        assert_eq!(got, vec![0, 1], "{:?}", p.rows);
+        // Day d+1 is only hot: the scan's SQL places the position the same way.
+        let p = e.tier_certs(&domains, None, &f, 10, Some(CertCursor::after_day(d + 2)), &none(), far()).await.unwrap();
+        let got: Vec<i64> = p.rows.iter().map(|r| r["entry_index"].as_i64().unwrap()).collect();
+        assert_eq!(got, vec![3, 2, 1, 0], "{:?}", p.rows);
+    }
+
+    fn cfg(dir: &std::path::Path) -> crate::config::Config {
+        crate::config::Config {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            data_dir: dir.to_path_buf(),
+            disk_budget_bytes: 1 << 40,
+            tracker_max_bytes: 1 << 20,
+            include_logs: vec![],
+            exclude_logs: vec![],
+            log_list_url: String::new(),
+            extra_log_lists: vec![],
+            include_test_logs: false,
+            coverage_target: 95.0,
+            dns: Default::default(),
+            hot_days: None,
+            dns_days: None,
+            archive_budget_bytes: Some(1 << 40),
+        }
+    }
+
+    fn day_name(day: i64) -> String {
+        crate::store::day_string(day * MS_PER_DAY)
+    }
+
+    /// Years of archived days the index covers, as files no reader could
+    /// open: reading one fails the walk.
+    fn junk_archive(dir: &std::path::Path, days: std::ops::Range<i64>) {
+        let a = dir.join("archive/certs");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(dir.join("nightly")).unwrap();
+        for day in days {
+            std::fs::write(a.join(format!("{}.parquet", day_name(day))), b"junk").unwrap();
+            std::fs::write(dir.join("nightly").join(format!("{}.domains", day_name(day))), b"").unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_domain_the_index_never_saw_reads_no_archive_day() {
+        let dir = tempfile::tempdir().unwrap();
+        junk_archive(dir.path(), 18_000..19_100);
+        let e = QueryEngine::open(dir.path()).unwrap();
+        let domains = ["never-seen.com".to_string()];
+        let f = TierFilter::default();
+        let (p, read) = walk(&e, &domains, &f, None, &Bound::certs(&[]), &mut clock(100)).await;
+        let p = p.unwrap();
+        assert!(read.is_empty(), "{read:?}");
+        assert!(p.rows.is_empty() && !p.cut_short && p.next_cursor.is_none());
+    }
+
+    /// One old archived day holds the domain; around it, years of other
+    /// archived days and one day the nightly job has not finished.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_domain_seen_on_one_day_reads_that_day_and_unfinished_days() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = 20_000;
+        let mut w = Writer::open(dir.path(), 0).unwrap();
+        w.push_cert(cert(1, d * MS_PER_DAY + 5));
+        w.flush(1).unwrap();
+        w.publish(1).unwrap();
+        crate::nightly::run_nightly(&cfg(dir.path()), chrono::NaiveDate::from_ymd_opt(2024, 10, 4).unwrap()).await.unwrap();
+        junk_archive(dir.path(), d - 800..d);
+        junk_archive(dir.path(), d + 1..d + 30);
+        let mut w = Writer::open(dir.path(), 0).unwrap();
+        w.push_cert(other(2, (d + 40) * MS_PER_DAY + 5));
+        w.flush(1).unwrap();
+        w.publish(1).unwrap();
+        let e = QueryEngine::open(dir.path()).unwrap();
+        let hits = e.search_domains("one.com", crate::query::Mode::Exact, 1).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        let domains = ["one.com".to_string()];
+        let f = TierFilter::default();
+        let (p, read) = walk(&e, &domains, &f, None, &Bound::certs(&hits), &mut clock(100)).await;
+        let p = p.unwrap();
+        assert_eq!(read, vec![d + 40, d]);
+        assert_eq!(p.rows.len(), 1, "{:?}", p.rows);
+        assert_eq!(p.rows[0]["entry_index"], 1);
+        assert!(!p.cut_short && p.next_cursor.is_none());
     }
 }

@@ -3,7 +3,7 @@
 
 use super::error::ApiError;
 use super::input::{self, Params};
-use crate::query::{CertCursor, Mode, TierFilter, TierPage};
+use crate::query::{Bound, CertCursor, Mode, TierFilter, TierPage};
 use crate::web::AppState;
 use axum::extract::State;
 use axum::Json;
@@ -75,15 +75,19 @@ pub(super) async fn certs(State(s): State<AppState>, Params(p): Params<CertsPara
         Some(c) => Some(CertCursor::decode(&c).ok_or_else(|| ApiError::BadRequest("malformed cursor".into()))?),
     };
     let _permits = s.v1.enter(s.engine.has_cert_archive())?;
-    let (domains, exact) = match scope {
+    // The index's first and last sightings bound the days the walk reads.
+    let (domains, exact, hits) = match scope {
         Scope::Domain(name, reg) => {
+            let hits = s.engine.search_domains_until(&reg, Mode::Exact, 1, deadline).await?;
+            let hits: Vec<_> = hits.into_iter().filter(|h| h.domain == reg).collect();
             let exact = (name != reg).then_some(name);
-            (vec![reg], exact)
+            (vec![reg], exact, hits)
         }
         Scope::Fuzzy(q, mode) => {
             let hits = s.engine.search_domains_until(&q, mode, MAX_HITS, deadline).await?;
-            (hits.into_iter().map(|h| h.domain).collect(), None)
+            (hits.iter().map(|h| h.domain.clone()).collect(), None, hits)
         }
     };
-    Ok(Json(s.engine.tier_certs(&domains, exact.as_deref(), &f, limit, after, deadline).await?))
+    let bound = Bound::certs(&hits);
+    Ok(Json(s.engine.tier_certs(&domains, exact.as_deref(), &f, limit, after, &bound, deadline).await?))
 }
