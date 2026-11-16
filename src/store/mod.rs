@@ -94,6 +94,16 @@ pub fn list_archive(data: &Path, table: &str) -> Vec<PathBuf> {
     out
 }
 
+/// Whether the archive directory of `table` holds a Parquet file; stops at
+/// the first.
+pub fn has_archive(data: &Path, table: &str) -> bool {
+    std::fs::read_dir(data.join("archive").join(table))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| e.path().extension().is_some_and(|x| x == "parquet"))
+}
+
 fn epoch_day(d: chrono::NaiveDate) -> i64 {
     d.signed_duration_since(chrono::NaiveDate::default()).num_days()
 }

@@ -2,10 +2,10 @@
 //! permanent index and its address history from both tiers.
 
 use super::error::ApiError;
-use super::input::{self, Params};
+use super::input::{self, Params, Segment};
 use crate::query::{Bound, DnsCursor, Mode, QueryError};
 use crate::web::AppState;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -26,7 +26,7 @@ fn resume_cursor(request: Option<&str>) -> String {
 
 pub(super) async fn domain(
     State(s): State<AppState>,
-    Path(raw): Path<String>,
+    Segment(raw): Segment<String>,
     Params(p): Params<DomainParams>,
 ) -> Result<Json<Value>, ApiError> {
     // One time limit for the whole request, summary included.

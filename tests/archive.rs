@@ -178,6 +178,33 @@ async fn budget_full_sets_no_marker_and_stays_pending() {
     assert_eq!(nightly::pending_days(d.path(), today, true), vec![day()]);
 }
 
+/// A full budget does not stop a day with nothing to archive from getting
+/// its markers.
+#[tokio::test(flavor = "multi_thread")]
+async fn nothing_to_archive_is_empty_even_over_budget() {
+    let d = tempfile::tempdir().unwrap();
+    let other = archive_file(d.path(), "certs", "2024-10-03");
+    std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+    std::fs::write(&other, b"existing").unwrap();
+    assert_eq!(archive::certs(d.path(), DAY, 1).await.unwrap(), Outcome::Empty);
+    assert_eq!(archive::dns(d.path(), DAY, 1).await.unwrap(), Outcome::Empty);
+}
+
+/// Days left are judged by each day's certs and dns files together.
+#[test]
+fn days_left_counts_both_archives_per_day() {
+    let d = tempfile::tempdir().unwrap();
+    for day in ["2024-10-03", "2024-10-04"] {
+        for (table, n) in [("certs", 100), ("dns", 50)] {
+            let f = archive_file(d.path(), table, day);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, vec![0u8; n]).unwrap();
+        }
+    }
+    // 150 bytes a day; 9,700 bytes of room.
+    assert_eq!(archive::days_left(d.path(), 10_000, 300), 64);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn existing_file_is_done_even_over_budget() {
     let d = tempfile::tempdir().unwrap();
@@ -217,6 +244,19 @@ async fn existing_hot_days_become_pending() {
     let today = NaiveDate::from_ymd_opt(2024, 10, 5).unwrap();
     assert_eq!(nightly::pending_days(d.path(), today, true).len(), 2);
     assert!(nightly::pending_days(d.path(), today, false).is_empty());
+}
+
+#[test]
+fn an_archive_holds_a_file_only_once_a_parquet_file_exists() {
+    let d = tempfile::tempdir().unwrap();
+    assert!(!ctprobe::store::has_archive(d.path(), "certs"));
+    let f = archive_file(d.path(), "certs", DAY);
+    std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+    std::fs::write(f.with_extension("parquet.tmp"), b"partial").unwrap();
+    assert!(!ctprobe::store::has_archive(d.path(), "certs"));
+    std::fs::write(f.with_file_name("merged.parquet"), b"x").unwrap();
+    assert!(ctprobe::store::has_archive(d.path(), "certs"));
+    assert!(!ctprobe::store::has_archive(d.path(), "dns"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -359,6 +399,21 @@ mod dns_archive {
         ])
         .await;
         assert_eq!(strings(&b, "name"), vec![Some("www.a.com".to_string())]);
+    }
+
+    /// Answers of one name at the same time keep the prober's attempt order.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn same_time_answers_follow_the_attempt() {
+        let (_d, b) = archived(vec![
+            probe("www.a.com", Some("a.com"), Kind::Name, 1, 2, Status::Resolved, &["3.3.3.3"]),
+            probe("www.a.com", Some("a.com"), Kind::Name, 1, 1, Status::Resolved, &["2.2.2.2"]),
+            probe("www.a.com", Some("a.com"), Kind::Name, 1, 0, Status::Resolved, &["1.1.1.1"]),
+        ])
+        .await;
+        let v4 = b.column_by_name("v4").unwrap().as_list::<i32>();
+        let got: Vec<String> = (0..b.num_rows()).map(|i| v4.value(i).as_string::<i32>().value(0).to_string()).collect();
+        assert_eq!(got, vec!["1.1.1.1", "2.2.2.2", "3.3.3.3"]);
+        assert_eq!(b.schema(), ctprobe::store::archive_dns_schema());
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -4,7 +4,7 @@
 use super::error::ApiError;
 use crate::names;
 use crate::query::Mode;
-use axum::extract::{FromRequestParts, Query};
+use axum::extract::{FromRequestParts, Path, Query};
 use axum::http::request::Parts;
 use chrono::NaiveDate;
 use serde::de::DeserializeOwned;
@@ -25,6 +25,22 @@ impl<S: Send + Sync, T: DeserializeOwned> FromRequestParts<S> for Params<T> {
             .await
             .map(|Query(t)| Params(t))
             .map_err(|e| ApiError::BadRequest(e.body_text()))
+    }
+}
+
+/// `Path<T>` whose rejection is an [`ApiError`], so a segment that does not
+/// decode gets the uniform JSON 400.
+pub struct Segment<T>(pub T);
+
+impl<S: Send + Sync, T: DeserializeOwned + Send> FromRequestParts<S> for Segment<T> {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, ApiError> {
+        match Path::<T>::from_request_parts(parts, state).await {
+            Ok(Path(t)) => Ok(Segment(t)),
+            Err(e) if e.status().is_server_error() => Err(ApiError::Internal(e.body_text())),
+            Err(e) => Err(ApiError::BadRequest(e.body_text())),
+        }
     }
 }
 

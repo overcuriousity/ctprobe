@@ -756,6 +756,8 @@ async fn domain_inputs_are_checked() {
         "/api/v1/domain/example.com?limit=0",
         "/api/v1/domain/example.com?cursor=garbage",
         "/api/v1/domain/example.com?bogus=1",
+        "/api/v1/domain/%ff",
+        "/api/v1/domain/%ff.com",
     ] {
         let (s, _, b) = get(&a, p).await;
         assert_eq!(s, 400, "{p}: {b}");

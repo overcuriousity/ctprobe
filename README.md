@@ -49,7 +49,7 @@ Then start it:
 |---|---|
 | `bind` | Address of the web interface |
 | `data_dir` | Where all data lives |
-| `disk_budget` | Ceiling for `data_dir`, in `GiB` or `MiB`. Old certificates expire to stay under it; ingest pauses if it cannot be met |
+| `disk_budget` | Ceiling for `data_dir` without its `archive/` directory, in `GiB` or `MiB`. Old certificates expire to stay under it; ingest pauses if it cannot be met. With the archive on, a day ages out of the hot tier only once it is archived, so a full `archive_budget` also stops age expiry |
 | `tracker_max` | Memory cap for renewal tracking. Over it, the oldest names are forgotten, so renewals are undercounted |
 | `include_logs`, `exclude_logs` | Substrings of log names, applied to every list |
 | `log_list_url` | The required log list. Defaults to Google's trusted list |
@@ -107,7 +107,7 @@ sighting of a searched domain (for `/domain`, from its first sighting on), plus 
 finished.
 
 Each row has a `tier`: `hot` while its day is still in the hot tier, `archive` once only the archive holds it.
-Certificate rows from `hot` also carry `detail`. DNS rows are the archive's reduction: each name's first answer
+Certificate rows from `hot` also carry `detail`, except when its fetch ran out of time or found no match. DNS rows are the archive's reduction: each name's first answer
 of the day and the answers that differ from the one before.
 
 ## Build from source

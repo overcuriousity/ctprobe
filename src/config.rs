@@ -180,7 +180,7 @@ impl Config {
             dns: raw.dns.build()?,
             hot_days: raw.hot_days,
             dns_days: raw.dns_days,
-            archive_budget_bytes: raw.archive_budget.as_deref().map(parse_size).transpose()?,
+            archive_budget_bytes: raw.archive_budget.as_deref().map(parse_size).transpose().context("archive_budget")?,
         })
     }
 }
@@ -274,5 +274,11 @@ mod tests {
         let c = load_keys("archive_budget = \"2GiB\"\n").unwrap();
         assert_eq!(c.archive_budget_bytes, Some(2 << 30));
         assert!(c.retention().archive);
+    }
+
+    #[test]
+    fn a_bad_archive_budget_names_the_key() {
+        let e = load_keys("archive_budget = \"2TB\"\n").unwrap_err();
+        assert!(format!("{e:#}").contains("archive_budget"), "{e:#}");
     }
 }

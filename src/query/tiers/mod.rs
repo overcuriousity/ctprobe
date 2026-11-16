@@ -8,7 +8,7 @@ mod walk;
 
 use super::sql::{quote, MS_PER_DAY};
 use super::{QueryEngine, QueryError};
-use crate::store::list_archive;
+use crate::store::has_archive;
 use base64::Engine;
 use days::Start;
 pub use dns::DnsCursor;
@@ -160,7 +160,7 @@ impl Scope<'_> {
 impl QueryEngine {
     /// True when the certificate archive holds a file.
     pub fn has_cert_archive(&self) -> bool {
-        !list_archive(&self.data, "certs").is_empty()
+        has_archive(&self.data, "certs")
     }
 
     /// One page of rows for `domains`, newest first, after `after`, on the

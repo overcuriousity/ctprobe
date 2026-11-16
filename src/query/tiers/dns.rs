@@ -9,7 +9,7 @@ use super::{TierPage, BASE64};
 use crate::nightly::archive::DNS_CHANGES_SQL;
 use crate::query::sql::{quote, MS_PER_DAY};
 use crate::query::{QueryEngine, QueryError};
-use crate::store::{archive_dns_schema, list_archive};
+use crate::store::{archive_dns_schema, has_archive};
 use base64::Engine;
 use serde_json::{Map, Value};
 use std::cmp::Reverse;
@@ -141,7 +141,7 @@ impl DayFetch for DnsFetch<'_> {
 impl QueryEngine {
     /// True when the DNS archive holds a file.
     pub fn has_dns_archive(&self) -> bool {
-        !list_archive(&self.data, "dns").is_empty()
+        has_archive(&self.data, "dns")
     }
 
     /// One page of address history for `reg_domain`, newest first, after

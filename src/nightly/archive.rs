@@ -20,6 +20,9 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::metadata::ParquetMetaDataReader;
 use parquet::arrow::{ArrowWriter, ProjectionMask};
 use arrow::datatypes::SchemaRef;
+use parquet::basic::{Compression, ZstdLevel};
+use parquet::file::properties::WriterProperties;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -41,15 +44,19 @@ pub fn archive_size(data: &Path) -> u64 {
 }
 
 /// Whole days of growth the budget still has room for, judged by the newest
-/// 30 files.
+/// 30 days: each day's cert and dns files together.
 pub fn days_left(data: &Path, budget: u64, total: u64) -> u64 {
-    let mut sizes: Vec<u64> = list_archive(data, "certs")
-        .iter()
-        .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
-        .collect();
-    let n = sizes.len().min(30);
-    sizes = sizes.split_off(sizes.len() - n);
-    let mean = sizes.iter().sum::<u64>() / n.max(1) as u64;
+    let mut per_day: BTreeMap<String, u64> = BTreeMap::new();
+    for p in list_archive(data, "certs").into_iter().chain(list_archive(data, "dns")) {
+        let Some(day) = p.file_stem().map(|s| s.to_string_lossy().into_owned()) else { continue };
+        // Daily files only; a file of any other name holds no one day.
+        if chrono::NaiveDate::parse_from_str(&day, "%Y-%m-%d").is_err() {
+            continue;
+        }
+        *per_day.entry(day).or_default() += std::fs::metadata(&p).map_or(0, |m| m.len());
+    }
+    let newest: Vec<u64> = per_day.into_values().rev().take(30).collect();
+    let mean = newest.iter().sum::<u64>() / newest.len().max(1) as u64;
     budget.saturating_sub(total) / mean.max(1)
 }
 
@@ -96,10 +103,12 @@ pub(crate) fn names_of<'a>(names: &[&'a str], reg: &str) -> Vec<&'a str> {
     mine
 }
 
-/// Pass 1: one unsorted row per (cert, registered domain).
+/// Pass 1: one unsorted row per (cert, registered domain). The file counts
+/// against the disk budget while it exists, so it is compressed, cheaply.
 fn expand(files: &[std::path::PathBuf], out: &Path) -> Result<u64> {
     let schema = archive_certs_schema();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(out)?, schema, None)?;
+    let fast = WriterProperties::builder().set_compression(Compression::ZSTD(ZstdLevel::try_new(1)?)).build();
+    let mut w = ArrowWriter::try_new(std::fs::File::create(out)?, schema, Some(fast))?;
     let mut b = Builders::default();
     let mut total = 0u64;
     for f in files {
@@ -210,20 +219,21 @@ pub const DNS_CHANGES_SQL: &str = "SELECT reg_domain, name, probed_at, status, v
          status || '|' || array_to_string(array_sort(v4), ',') || '|' || array_to_string(array_sort(v6), ',') AS cur
   FROM t WHERE kind = 'name' AND reg_domain IS NOT NULL
   WINDOW w AS (PARTITION BY name ORDER BY probed_at, attempt)
-) WHERE rn = 1 OR cur <> prev
-ORDER BY reg_domain, name, probed_at";
+) WHERE rn = 1 OR cur IS DISTINCT FROM prev
+ORDER BY reg_domain, name, probed_at, attempt";
 
 pub async fn dns(data: &Path, day: &str, budget: u64) -> Result<Outcome> {
     let dest = archive_file(data, "dns", day);
     if let Some(done) = finished(&dest)? {
         return Ok(done);
     }
-    if archive_size(data) >= budget {
-        return Ok(Outcome::BudgetFull);
-    }
+    // Nothing to archive is done whatever the budget.
     let files = list_day(data, "dns", day);
     if files.is_empty() {
         return Ok(Outcome::Empty);
+    }
+    if archive_size(data) >= budget {
+        return Ok(Outcome::BudgetFull);
     }
     let ctx = session(data, MEMORY, PARTITIONS)?;
     register_files(&ctx, "t", dns_schema(), &files).await?;
@@ -238,12 +248,13 @@ pub async fn certs(data: &Path, day: &str, budget: u64) -> Result<Outcome> {
     if let Some(done) = finished(&dest)? {
         return Ok(done);
     }
-    if archive_size(data) >= budget {
-        return Ok(Outcome::BudgetFull);
-    }
+    // Nothing to archive is done whatever the budget.
     let files = list_day(data, "certs", day);
     if files.is_empty() {
         return Ok(Outcome::Empty);
+    }
+    if archive_size(data) >= budget {
+        return Ok(Outcome::BudgetFull);
     }
     let tmp_dir = data.join("tmp");
     std::fs::create_dir_all(&tmp_dir)?;
@@ -260,4 +271,45 @@ pub async fn certs(data: &Path, day: &str, budget: u64) -> Result<Outcome> {
     write_query(&ctx, "SELECT * FROM t ORDER BY reg_domain, seen_at", schema, &dest).await?;
     std::fs::remove_file(&unsorted)?;
     Ok(Outcome::Written { rows, bytes: std::fs::metadata(&dest)?.len() })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::Writer;
+    use crate::types::{CertRow, ParsedCert, RenewalClass};
+
+    /// The unsorted pass-1 file counts against the disk budget, so it is
+    /// compressed too.
+    #[test]
+    fn pass_one_file_is_compressed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = Writer::open(dir.path(), 0).unwrap();
+        w.push_cert(CertRow {
+            parsed: ParsedCert { names: vec!["a.one.com".into()], ..Default::default() },
+            reg_domains: vec!["one.com".into()],
+            primary_domain: Some("one.com".into()),
+            is_wildcard: false,
+            is_precert: false,
+            renewal: RenewalClass::New,
+            days_since_seen: None,
+            new_names: 0,
+            new_domains: 0,
+            log: 0,
+            index: 1,
+            der_size: 1,
+            seen_at_ms: 20_000 * 86_400_000,
+            sct_lag_ms: 0,
+            not_before_lag_ms: 0,
+            cert_hash: 1,
+        });
+        w.flush(1).unwrap();
+        w.publish(1).unwrap();
+        let out = dir.path().join("unsorted.parquet");
+        assert_eq!(expand(&list_day(dir.path(), "certs", "2024-10-04"), &out).unwrap(), 1);
+        let meta = ParquetMetaDataReader::new().parse_and_finish(&std::fs::File::open(&out).unwrap()).unwrap();
+        for c in meta.row_group(0).columns() {
+            assert!(matches!(c.compression(), Compression::ZSTD(_)), "{}: {:?}", c.column_path(), c.compression());
+        }
+    }
 }
