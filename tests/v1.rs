@@ -294,6 +294,26 @@ async fn matches_a_non_primary_domain() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn rows_dropped_in_rust_are_refilled() {
+    // Only the oldest lists a.one.com; the two newer ones are wildcards that
+    // do not cover it.
+    let certs = vec![
+        cert(1, &["a.one.com"], D + 1),
+        cert(2, &["*.b.one.com", "b.one.com"], D + 2),
+        cert(3, &["*.c.one.com", "c.one.com"], D + 3),
+    ];
+    let a = app_with(Setup { certs, ..Default::default() }).await;
+    let p = page(&a, "/api/v1/certs?domain=a.one.com&limit=1").await;
+    assert_eq!(indexes(p["rows"].as_array().unwrap()), vec![1], "{p}");
+    assert!(p["next_cursor"].is_null(), "{p}");
+    // The scan cannot push `wildcard=false` into SQL, so the two newest rows
+    // are dropped in Rust and the day is read again.
+    let p = page(&a, "/api/v1/certs?domain=one.com&wildcard=false&limit=1").await;
+    assert_eq!(indexes(p["rows"].as_array().unwrap()), vec![1], "{p}");
+    assert!(p["next_cursor"].is_null(), "{p}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn tier_marks_follow_the_hot_dir() {
     let a = app_with(Setup { certs: vec![two_domain_cert()], archive: vec![D], ..Default::default() }).await;
     let hot = rows(&a, "/api/v1/certs?domain=one.com").await;

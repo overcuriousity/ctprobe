@@ -8,6 +8,7 @@ use crate::web::AppState;
 use axum::extract::State;
 use axum::Json;
 use serde::Deserialize;
+use std::time::Instant;
 
 /// Domain hits a fuzzy scope looks up.
 const MAX_HITS: usize = 100;
@@ -42,6 +43,8 @@ fn text(v: Option<String>) -> Option<String> {
 }
 
 pub(super) async fn certs(State(s): State<AppState>, Params(p): Params<CertsParams>) -> Result<Json<TierPage>, ApiError> {
+    // One time limit for the whole request, search included.
+    let deadline = Instant::now() + s.engine.timeout();
     let scope = match (p.domain.as_deref(), p.q.as_deref()) {
         (Some(d), None) => {
             if p.mode.is_some() || p.distance.is_some() {
@@ -71,16 +74,16 @@ pub(super) async fn certs(State(s): State<AppState>, Params(p): Params<CertsPara
         None => None,
         Some(c) => Some(CertCursor::decode(&c).ok_or_else(|| ApiError::BadRequest("malformed cursor".into()))?),
     };
-    let _permits = s.v1.enter(s.engine.has_archive())?;
+    let _permits = s.v1.enter(s.engine.has_cert_archive())?;
     let (domains, exact) = match scope {
         Scope::Domain(name, reg) => {
             let exact = (name != reg).then_some(name);
             (vec![reg], exact)
         }
         Scope::Fuzzy(q, mode) => {
-            let hits = s.engine.search_domains(&q, mode, MAX_HITS).await?;
+            let hits = s.engine.search_domains_until(&q, mode, MAX_HITS, deadline).await?;
             (hits.into_iter().map(|h| h.domain).collect(), None)
         }
     };
-    Ok(Json(s.engine.tier_certs(&domains, exact.as_deref(), &f, limit, after).await?))
+    Ok(Json(s.engine.tier_certs(&domains, exact.as_deref(), &f, limit, after, deadline).await?))
 }

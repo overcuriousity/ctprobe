@@ -337,10 +337,42 @@ impl QueryEngine {
         to: Option<i64>,
         timeout: Duration,
     ) -> Result<QueryResult, QueryError> {
+        self.run_on(sql, limit, from, to, timeout, false).await
+    }
+
+    /// Like `run_for`, but waiting for the limiter counts against `timeout`.
+    pub(super) async fn run_within(
+        &self,
+        sql: String,
+        limit: usize,
+        from: Option<i64>,
+        to: Option<i64>,
+        timeout: Duration,
+    ) -> Result<QueryResult, QueryError> {
+        self.run_on(sql, limit, from, to, timeout, true).await
+    }
+
+    async fn run_on(
+        &self,
+        sql: String,
+        limit: usize,
+        from: Option<i64>,
+        to: Option<i64>,
+        timeout: Duration,
+        bound_wait: bool,
+    ) -> Result<QueryResult, QueryError> {
         let data = self.data.clone();
         let limiter = self.limiter.clone();
         let task = self.rt.spawn(async move {
-            let _permit = limiter.acquire_owned().await.map_err(|e| QueryError::Failed(e.to_string()))?;
+            let asked = Instant::now();
+            let acquire = limiter.acquire_owned();
+            let permit = if bound_wait {
+                tokio::time::timeout(timeout, acquire).await.map_err(|_| QueryError::Timeout)?
+            } else {
+                acquire.await
+            };
+            let _permit = permit.map_err(|e| QueryError::Failed(e.to_string()))?;
+            let timeout = if bound_wait { timeout.saturating_sub(asked.elapsed()) } else { timeout };
             let work = async {
                 let ctx = context(&data, from, to).await?;
                 let df = ctx.sql(&sql).await?;

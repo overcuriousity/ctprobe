@@ -272,9 +272,29 @@ impl QueryEngine {
         limit: usize,
     ) -> Result<Vec<DomainHit>, QueryError> {
         let _permit = self.limiter.acquire().await.map_err(|e| QueryError::Failed(e.to_string()))?;
+        self.search_with(q, mode, limit, Instant::now() + self.timeout).await
+    }
+
+    /// Like `search_domains`, but waiting for the limiter and the search both
+    /// end at `until`.
+    pub async fn search_domains_until(
+        &self,
+        q: &str,
+        mode: Mode,
+        limit: usize,
+        until: Instant,
+    ) -> Result<Vec<DomainHit>, QueryError> {
+        let wait = until.saturating_duration_since(Instant::now());
+        let _permit = tokio::time::timeout(wait, self.limiter.acquire())
+            .await
+            .map_err(|_| QueryError::Timeout)?
+            .map_err(|e| QueryError::Failed(e.to_string()))?;
+        self.search_with(q, mode, limit, until).await
+    }
+
+    async fn search_with(&self, q: &str, mode: Mode, limit: usize, until: Instant) -> Result<Vec<DomainHit>, QueryError> {
         let m = Matcher::new(q, mode);
         let mut out = HashMap::new();
-        let until = Instant::now() + self.timeout;
         let timed = |e: anyhow::Error| match e.is::<TimedOut>() {
             true => QueryError::Timeout,
             false => QueryError::from(e),

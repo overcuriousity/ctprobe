@@ -52,6 +52,10 @@ impl QueryEngine {
         self.timeout = t;
     }
 
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
     pub fn data_dir(&self) -> &Path {
         &self.data
     }

@@ -123,7 +123,10 @@ pub fn archive_days(data: &Path, table: &str, ts: &str) -> BTreeMap<i64, Vec<Pat
             Ok(d) => epoch_day(d)..=epoch_day(d),
             Err(_) => match footer_range(&p, ts) {
                 Some((lo, hi)) => lo.div_euclid(MS_PER_DAY)..=hi.div_euclid(MS_PER_DAY),
-                None => continue,
+                None => {
+                    tracing::warn!("skipping archive file {}: no readable {ts} range in its footer", p.display());
+                    continue;
+                }
             },
         };
         for d in days {

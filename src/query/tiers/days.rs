@@ -9,12 +9,15 @@ use arrow::datatypes::{DataType, SchemaRef};
 use serde_json::{Map, Value};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Keys of a row besides `tier` and `detail`.
 const TOP: [&str; 9] =
     ["reg_domain", "names", "seen_at", "not_before", "not_after", "issuer_cn", "issuer_org", "log_id", "entry_index"];
 const NEWEST: &str = "seen_at DESC, log_id DESC, entry_index DESC";
+/// A certificate's `(log_id, entry_index)` as one string, so that exact pairs
+/// fit one flat `IN` list.
+const PAIR: &str = "concat(CAST(log_id AS VARCHAR), ':', CAST(entry_index AS VARCHAR))";
 
 /// Where a day's next query starts.
 pub(super) enum Start {
@@ -26,11 +29,13 @@ pub(super) enum Start {
 }
 
 /// What one query of a day gave: rows in page order, how many rows SQL
-/// returned, and where the next query of the day starts.
+/// returned, and where the next query of the day starts. `cut` means the
+/// deadline passed while the rows were being completed.
 pub(super) struct Got {
     pub(super) rows: Vec<Value>,
     pub(super) returned: usize,
     pub(super) next: Option<CertCursor>,
+    pub(super) cut: bool,
 }
 
 /// Columns of a schema, with timestamps as milliseconds.
@@ -73,12 +78,20 @@ fn detail(mut hot: Map<String, Value>) -> Map<String, Value> {
     hot
 }
 
+/// `(log_id, entry_index)` as one value, matching `PAIR`.
+fn pair((log, index): (i64, i64)) -> String {
+    format!("{log}:{index}")
+}
+
 fn key(o: &Map<String, Value>) -> (i64, i64) {
     let n = |k: &str| o.get(k).and_then(Value::as_i64).unwrap_or_default();
     (n("log_id"), n("entry_index"))
 }
 
-impl QueryEngine {    /// One day from its archive files, with hot detail while the day is hot.
+impl QueryEngine {
+    /// One day from its archive files. While the day is hot its rows are
+    /// `hot`, with `detail` when the hot rows are found within the time `left`.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn archive_day(
         &self,
         scope: &Scope<'_>,
@@ -87,8 +100,8 @@ impl QueryEngine {    /// One day from its archive files, with hot detail while 
         start: Option<&Start>,
         n: usize,
         t: Duration,
+        left: &mut (dyn FnMut() -> Option<Duration> + Send),
     ) -> Result<Got, QueryError> {
-        let until = Instant::now() + t;
         let mut conds = scope.conditions(day, format!("reg_domain IN ({})", scope.list()), true);
         if let Some(Start::Cursor(c) | Start::After(c)) = start {
             conds.push(c.sql(&format!("reg_domain > {}", quote(&c.reg_domain))));
@@ -100,37 +113,46 @@ impl QueryEngine {    /// One day from its archive files, with hot detail while 
         );
         let found = objects(self.run_archive(files.to_vec(), sql, n, t).await?);
         let mut hot = HashMap::new();
+        let mut cut = false;
         let (lo, hi) = (day * MS_PER_DAY, day * MS_PER_DAY + MS_PER_DAY - 1);
-        if !found.is_empty() && !list_day(&self.data, "certs", &day_string(lo)).is_empty() {
+        let is_hot = !list_day(&self.data, "certs", &day_string(lo)).is_empty();
+        if !found.is_empty() && is_hot {
             let list = |v: BTreeSet<String>| v.into_iter().collect::<Vec<_>>().join(", ");
             let primary = |o: &Map<String, Value>| {
                 o.get("primary_domain").and_then(Value::as_str).or(o.get("reg_domain").and_then(Value::as_str)).map(quote)
             };
+            let pairs: BTreeSet<String> = found.iter().map(|o| quote(&pair(key(o)))).collect();
+            // Exact pairs; `primary_domain` and `entry_index` let files and
+            // row groups be skipped.
             let sql = format!(
-                "SELECT {} FROM certs WHERE primary_domain IN ({}) AND log_id IN ({}) AND entry_index IN ({})",
+                "SELECT {} FROM certs WHERE primary_domain IN ({}) AND entry_index IN ({}) AND {PAIR} IN ({})",
                 columns(certs_schema()),
                 list(found.iter().filter_map(primary).collect()),
-                list(found.iter().map(|o| key(o).0.to_string()).collect()),
                 list(found.iter().map(|o| key(o).1.to_string()).collect()),
+                list(pairs.clone()),
             );
-            let cap = 4 * found.len() + 100;
-            let r = self.run_for(sql, cap, Some(lo), Some(hi), until.saturating_duration_since(Instant::now())).await?;
-            hot = objects(r).into_iter().map(|o| (key(&o), o)).collect();
+            let got = match left() {
+                Some(t) => self.run_within(sql, 2 * pairs.len(), Some(lo), Some(hi), t).await,
+                None => Err(QueryError::Timeout),
+            };
+            match got {
+                Ok(r) => hot = objects(r).into_iter().map(|o| (key(&o), o)).collect(),
+                Err(QueryError::Timeout) => cut = true,
+                Err(e) => return Err(e),
+            }
         }
         let returned = found.len();
+        let tier = if is_hot { "hot" } else { "archive" };
         let rows: Vec<Value> = found
             .iter()
             .map(|o| {
                 let reg = o.get("reg_domain").and_then(Value::as_str).unwrap_or_default();
                 let names = o.get("names").and_then(Value::as_array).cloned().unwrap_or_default();
-                match hot.get(&key(o)) {
-                    Some(h) => row("hot", reg, names, o, Some(detail(h.clone()))),
-                    None => row("archive", reg, names, o, None),
-                }
+                row(tier, reg, names, o, hot.get(&key(o)).map(|h| detail(h.clone())))
             })
             .collect();
         let next = rows.last().map(CertCursor::of);
-        Ok(Got { rows, returned, next })
+        Ok(Got { rows, returned, next, cut })
     }
 
     /// One day scanned in the hot tier, each certificate split by domain.
@@ -154,7 +176,7 @@ impl QueryEngine {    /// One day from its archive files, with hot detail while 
             conds.join(" AND ")
         );
         let (lo, hi) = (day * MS_PER_DAY, day * MS_PER_DAY + MS_PER_DAY - 1);
-        let found = objects(self.run_for(sql, n, Some(lo), Some(hi), t).await?);
+        let found = objects(self.run_within(sql, n, Some(lo), Some(hi), t).await?);
         let wanted: HashSet<&str> = scope.domains.iter().map(String::as_str).collect();
         let strs = |o: &Map<String, Value>, k: &str| -> Vec<String> {
             o.get(k).and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect()
@@ -175,7 +197,7 @@ impl QueryEngine {    /// One day from its archive files, with hot detail while 
             let n = |k: &str| o.get(k).and_then(Value::as_i64).unwrap_or_default();
             CertCursor { seen_at_ms: n("seen_at"), log_id: n("log_id") as i32, entry_index: n("entry_index"), reg_domain: String::new() }
         });
-        Ok(Got { rows, returned: found.len(), next })
+        Ok(Got { rows, returned: found.len(), next, cut: false })
     }
 
     /// A query over archive files on the query runtime, bounded by `t` but

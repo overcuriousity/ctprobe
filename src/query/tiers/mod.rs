@@ -145,9 +145,9 @@ impl Scope<'_> {
 }
 
 impl QueryEngine {
-    /// True when either archive directory holds a file.
-    pub fn has_archive(&self) -> bool {
-        !list_archive(&self.data, "certs").is_empty() || !list_archive(&self.data, "dns").is_empty()
+    /// True when the certificate archive holds a file.
+    pub fn has_cert_archive(&self) -> bool {
+        !list_archive(&self.data, "certs").is_empty()
     }
 
     /// One page of rows for `domains`, newest first, after `after`. With
@@ -159,8 +159,8 @@ impl QueryEngine {
         f: &TierFilter,
         limit: usize,
         after: Option<CertCursor>,
+        deadline: Instant,
     ) -> Result<TierPage, QueryError> {
-        let deadline = Instant::now() + self.timeout;
         let mut left = || deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero());
         self.walk(domains, exact_name, f, limit, after, &mut left).await
     }
@@ -188,8 +188,20 @@ impl QueryEngine {
         let want = limit + 1;
         let mut out: Vec<Value> = Vec::new();
         let mut cut_short = false;
-        let archive = if scope.domains.is_empty() { BTreeMap::new() } else { archive_days(&self.data, "certs", "seen_at") };
-        let mut days = if scope.domains.is_empty() { vec![] } else { days_of(&self.data, "certs", f.from_ms, f.to_ms) };
+        let (archive, mut days) = if scope.domains.is_empty() {
+            (BTreeMap::new(), vec![])
+        } else {
+            // Directory listings and footers: blocking reads, kept off the web workers.
+            let t = left().ok_or(QueryError::Timeout)?;
+            let (data, from, to) = (self.data.clone(), f.from_ms, f.to_ms);
+            let job = self.rt.spawn_blocking(move || {
+                (archive_days(&data, "certs", "seen_at"), days_of(&data, "certs", from, to))
+            });
+            tokio::time::timeout(t, job)
+                .await
+                .map_err(|_| QueryError::Timeout)?
+                .map_err(|e| QueryError::Failed(e.to_string()))?
+        };
         let in_range = |d: &i64| {
             f.from_ms.is_none_or(|t| *d >= t.div_euclid(MS_PER_DAY)) && f.to_ms.is_none_or(|t| *d <= t.div_euclid(MS_PER_DAY))
         };
@@ -207,7 +219,7 @@ impl QueryEngine {
                 };
                 let n = want - out.len();
                 let got = match archive.get(&day) {
-                    Some(files) => self.archive_day(&scope, day, files, start.as_ref(), n, t).await,
+                    Some(files) => self.archive_day(&scope, day, files, start.as_ref(), n, t, &mut *left).await,
                     None => self.hot_day(&scope, day, start.as_ref(), n, t).await,
                 };
                 let got = match got {
@@ -223,6 +235,10 @@ impl QueryEngine {
                         && after.as_ref().is_none_or(|c| rank(r) > c.rank())
                         && seen.insert(CertCursor::of(r).encode())
                 }));
+                if got.cut {
+                    cut_short = true;
+                    break 'days;
+                }
                 if out.len() >= want {
                     break 'days;
                 }
@@ -240,7 +256,6 @@ impl QueryEngine {
         let next_cursor = out.last().filter(|_| more).map(|r| CertCursor::of(r).encode());
         Ok(TierPage { rows: out, next_cursor, cut_short })
     }
-
 }
 
 #[cfg(test)]
@@ -291,8 +306,22 @@ mod tests {
         }
     }
 
-    /// The deadline passes after the first day's query: the rows of that day
-    /// come back cut short, and the cursor reaches the next day.
+    /// A clock with time for the first `n` asks and none after.
+    fn clock(n: usize) -> impl FnMut() -> Option<Duration> + Send {
+        let mut calls = 0;
+        move || {
+            calls += 1;
+            (calls <= n).then_some(Duration::from_secs(30))
+        }
+    }
+
+    fn far() -> Instant {
+        Instant::now() + Duration::from_secs(30)
+    }
+
+    /// The deadline passes after the first day's query (asks: the listing,
+    /// then the query): the rows of that day come back cut short, and the
+    /// cursor reaches the next day.
     #[tokio::test(flavor = "multi_thread")]
     async fn deadline_after_first_day_is_cut_short() {
         let dir = tempfile::tempdir().unwrap();
@@ -305,22 +334,47 @@ mod tests {
         let e = QueryEngine::open(dir.path()).unwrap();
         let domains = ["one.com".to_string()];
         let f = TierFilter::default();
-        let mut calls = 0;
-        let mut left = || {
-            calls += 1;
-            (calls == 1).then_some(Duration::from_secs(30))
-        };
-        let p = e.walk(&domains, None, &f, 10, None, &mut left).await.unwrap();
+        let p = e.walk(&domains, None, &f, 10, None, &mut clock(2)).await.unwrap();
         assert!(p.cut_short);
         assert_eq!(p.rows.len(), 1);
         assert_eq!(p.rows[0]["entry_index"], 2);
         let c = CertCursor::decode(p.next_cursor.as_deref().unwrap()).unwrap();
-        let rest = e.tier_certs(&domains, None, &f, 10, Some(c)).await.unwrap();
+        let rest = e.tier_certs(&domains, None, &f, 10, Some(c), far()).await.unwrap();
         assert!(!rest.cut_short && rest.next_cursor.is_none());
         assert_eq!(rest.rows.len(), 1);
         assert_eq!(rest.rows[0]["entry_index"], 1);
 
-        let mut never = || None;
-        assert!(matches!(e.walk(&domains, None, &f, 10, None, &mut never).await, Err(QueryError::Timeout)));
+        assert!(matches!(e.walk(&domains, None, &f, 10, None, &mut clock(0)).await, Err(QueryError::Timeout)));
+        assert!(matches!(e.walk(&domains, None, &f, 10, None, &mut clock(1)).await, Err(QueryError::Timeout)));
+    }
+
+    /// The deadline passes before the hot detail of an archived, still hot day
+    /// is fetched (asks: the listing, the archive query, the detail): the
+    /// rows found are kept, `hot` without `detail`, and the page is cut short.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn detail_timeout_keeps_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = 20_000 * MS_PER_DAY;
+        let mut w = Writer::open(dir.path(), 0).unwrap();
+        w.push_cert(cert(1, d + 5));
+        w.push_cert(cert(2, d + 6));
+        w.flush(1).unwrap();
+        w.publish(1).unwrap();
+        crate::nightly::archive::certs(dir.path(), "2024-10-04", u64::MAX).await.unwrap();
+        let e = QueryEngine::open(dir.path()).unwrap();
+        let domains = ["one.com".to_string()];
+        let f = TierFilter::default();
+        let p = e.walk(&domains, None, &f, 10, None, &mut clock(2)).await.unwrap();
+        assert!(p.cut_short);
+        assert_eq!(p.rows.len(), 2);
+        assert!(p.rows.iter().all(|r| r["tier"] == "hot" && r.get("detail").is_none()), "{:?}", p.rows);
+        let c = CertCursor::decode(p.next_cursor.as_deref().unwrap()).unwrap();
+        assert_eq!(c.entry_index, 1);
+        let rest = e.tier_certs(&domains, None, &f, 10, Some(c), far()).await.unwrap();
+        assert!(rest.rows.is_empty() && !rest.cut_short && rest.next_cursor.is_none());
+
+        let full = e.walk(&domains, None, &f, 10, None, &mut clock(3)).await.unwrap();
+        assert!(!full.cut_short);
+        assert!(full.rows.iter().all(|r| r["tier"] == "hot" && r["detail"]["key_type"].is_string()), "{:?}", full.rows);
     }
 }
