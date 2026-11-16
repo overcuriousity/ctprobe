@@ -17,6 +17,9 @@ fn cfg() -> Config {
         include_test_logs: false,
         coverage_target: 95.0,
         dns: Default::default(),
+        hot_days: None,
+        dns_days: None,
+        archive_budget_bytes: None,
     }
 }
 

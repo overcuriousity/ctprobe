@@ -28,6 +28,9 @@ fn cfg(dir: &Path) -> Config {
         include_test_logs: false,
         coverage_target: 95.0,
         dns: Default::default(),
+        hot_days: None,
+        dns_days: None,
+        archive_budget_bytes: None,
     }
 }
 
@@ -216,6 +219,10 @@ async fn empty_day_succeeds() {
     nightly::run_nightly(&cfg(d.path()), day()).await.unwrap();
 }
 
+fn ret(budget: u64) -> expire::Retention {
+    expire::Retention { budget, hot_days: None, dns_days: None, archive: false }
+}
+
 #[test]
 fn expiry_keeps_budget_and_permanent_tables() {
     let d = tempfile::tempdir().unwrap();
@@ -231,7 +238,7 @@ fn expiry_keeps_budget_and_permanent_tables() {
     mk("sightings", "2026-01-20", 10);
     mk("rollup_daily", "2026-01-01", 10);
     let today = NaiveDate::from_ymd_opt(2026, 1, 25).unwrap();
-    let r = expire::enforce(d.path(), 2300, today).unwrap();
+    let r = expire::enforce(d.path(), &ret(2300), today).unwrap();
     assert_eq!(r, None);
     assert!(!d.path().join("sightings/day=2026-01-01").exists(), "past 14 days");
     assert!(d.path().join("sightings/day=2026-01-20").exists());
@@ -239,7 +246,7 @@ fn expiry_keeps_budget_and_permanent_tables() {
     assert!(d.path().join("certs/day=2026-01-02").exists());
     assert!(d.path().join("rollup_daily/day=2026-01-01").exists());
     // A budget the permanent tables alone exceed reports a reason.
-    let r = expire::enforce(d.path(), 5, today).unwrap();
+    let r = expire::enforce(d.path(), &ret(5), today).unwrap();
     assert!(r.is_some());
 }
 
@@ -259,11 +266,11 @@ fn expiry_spares_days_nightly_has_not_finished() {
     std::fs::write(done.join("2026-01-02.domains"), b"").unwrap();
     std::fs::write(done.join("2026-01-03.domains"), b"").unwrap();
     let today = NaiveDate::from_ymd_opt(2026, 1, 25).unwrap();
-    assert_eq!(expire::enforce(d.path(), 2300, today).unwrap(), None);
+    assert_eq!(expire::enforce(d.path(), &ret(2300), today).unwrap(), None);
     assert!(d.path().join("certs/day=2026-01-01").exists(), "not rolled up yet");
     assert!(!d.path().join("certs/day=2026-01-02").exists());
     // Over the hard budget even so, it goes too.
-    expire::enforce(d.path(), 500, today).unwrap();
+    expire::enforce(d.path(), &ret(500), today).unwrap();
     assert!(!d.path().join("certs/day=2026-01-01").exists());
 }
 

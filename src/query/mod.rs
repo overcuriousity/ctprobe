@@ -4,8 +4,10 @@
 pub mod buckets;
 mod search;
 mod sql;
+mod tiers;
 
 pub use search::{DomainHit, Mode};
+pub use tiers::*;
 pub use sql::{quote, CertFilter, CertPage, CertScope, DnsFilter, QueryError, QueryResult, SortKey, MAX_OFFSET};
 
 use anyhow::Result;
@@ -48,6 +50,10 @@ impl QueryEngine {
 
     pub fn set_timeout(&mut self, t: Duration) {
         self.timeout = t;
+    }
+
+    pub fn timeout(&self) -> Duration {
+        self.timeout
     }
 
     pub fn data_dir(&self) -> &Path {

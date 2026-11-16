@@ -49,13 +49,16 @@ Then start it:
 |---|---|
 | `bind` | Address of the web interface |
 | `data_dir` | Where all data lives |
-| `disk_budget` | Ceiling for `data_dir`, in `GiB` or `MiB`. Old certificates expire to stay under it; ingest pauses if it cannot be met |
+| `disk_budget` | Ceiling for `data_dir` without its `archive/` directory, in `GiB` or `MiB`. Old certificates expire to stay under it; ingest pauses if it cannot be met. With the archive on, a day ages out of the hot tier only once it is archived, so a full `archive_budget` also stops age expiry |
 | `tracker_max` | Memory cap for renewal tracking. Over it, the oldest names are forgotten, so renewals are undercounted |
 | `include_logs`, `exclude_logs` | Substrings of log names, applied to every list |
 | `log_list_url` | The required log list. Defaults to Google's trusted list |
 | `extra_log_lists` | Further lists, by default Apple's. A log on any list is followed. A list that cannot be read is skipped and its logs are kept |
 | `include_test_logs` | Also follows the stateless logs on Google's full list, which appear to be test or staging logs. Off by default, because they then count in every figure except coverage |
 | `coverage_target` | Percent of certificates the coverage assessment aims for, default 95. It only advises: ctprobe keeps following every log |
+| `hot_days` | Days certificates stay in the hot tier before moving to the archive. Unset by default: certificates are kept until the budget forces expiry |
+| `dns_days` | Days of DNS probes kept. Defaults to `hot_days`, at least 365, when `hot_days` is set. A value below `hot_days` logs a warning |
+| `archive_budget` | Ceiling for the archive directory, in `GiB` or `MiB`. Unset by default: no archive tier |
 | `[dns] resolver` | Recursive resolver for DNS probing, such as `"127.0.0.1:5335"`. Without it, nothing is probed |
 | `[dns] max_qps` | Queries per second to the resolver, default 2000. Each probe sends two, A and AAAA. Names that do not fit in a burst are skipped and counted |
 | `[dns] sample_pct` | Percent of names probed, default 100. Chosen by a hash of the name, so the same names are probed on every certificate |
@@ -78,6 +81,34 @@ run it as the service's user, because files created as root stop the service rea
 
     sudo systemd-run --wait --pipe -p DynamicUser=yes -p StateDirectory=ctprobe \
       /usr/local/bin/ctprobe nightly --config /etc/ctprobe/config.toml
+
+## API v1
+
+`/api/v1` answers in JSON, with times in milliseconds. Unknown query parameters are a 400.
+
+| Route | Parameters |
+|---|---|
+| `GET /api/v1/search` | `q`, `mode` (`exact`, `contains`, `levenshtein`, `homoglyph`), `distance`, `limit`. Domain hits from the permanent index |
+| `GET /api/v1/certs` | One of `domain` or `q` (with `mode`, `distance`); filters `from`, `to`, `expires_from`, `expires_to`, `issuer`, `issuer_contains`, `tld`, `wildcard`; `limit`, `cursor`. One row per certificate and registered domain, newest first, from both tiers |
+| `GET /api/v1/domain/{domain}` | `limit`, `cursor`. `first_seen`, `last_seen` and `cert_count` from the index (null when only DNS rows exist), and `dns`: the address history, newest first, with the same `rows`, `next_cursor` and `cut_short` as certs |
+
+Errors have one shape, `{"error": {"code": "...", "message": "..."}}`, with codes `bad_request` (400),
+`not_found` (404), `busy` (429), `timeout` (504) and `internal` (500). Unknown `/api/v1` paths get it too.
+
+A request that finds no free slot is refused at once with 429 and `Retry-After: 1`; it never queues.
+Two requests run at once, and only one of them may read the archive.
+
+`limit` is 1 to 1000, default 100, and a value outside that is a 400. Follow `next_cursor` until it is null.
+`cut_short: true` means the time limit ended the walk: `next_cursor` is then always set and continues after the
+last row, or after the last day the walk read to its end, so a page can be empty and still move on. Only a walk that
+finished no day and found no row is a 504; for `/domain` with a summary it is a 200 with empty `rows`,
+`cut_short: true` and a cursor to retry from. The walk reads only the days within the index's first and last
+sighting of a searched domain (for `/domain`, from its first sighting on), plus the days the nightly job has not
+finished.
+
+Each row has a `tier`: `hot` while its day is still in the hot tier, `archive` once only the archive holds it.
+Certificate rows from `hot` also carry `detail`, except when its fetch ran out of time or found no match. DNS rows are the archive's reduction: each name's first answer
+of the day and the answers that differ from the one before.
 
 ## Build from source
 

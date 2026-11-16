@@ -15,13 +15,13 @@ use parquet::schema::types::ColumnPath;
 use std::path::Path;
 
 /// Distinct values a bloom filter is sized for, per row group.
-const BLOOM_NDV: u64 = 5_000_000;
+pub(super) const BLOOM_NDV: u64 = 5_000_000;
 /// `dns` row groups hold a million rows, so no column has more distinct values.
 const DNS_BLOOM_NDV: u64 = 1_000_000;
 
 /// Writer settings with a bloom filter on each of `bloom`, so lookups by
 /// those columns skip the row groups that cannot hold the value.
-fn props(bloom: &[(&str, u64)]) -> WriterProperties {
+pub(super) fn props(bloom: &[(&str, u64)]) -> WriterProperties {
     let mut b = WriterProperties::builder()
         .set_compression(Compression::ZSTD(ZstdLevel::try_new(6).expect("valid level")))
         .set_max_row_group_row_count(Some(1_000_000));
@@ -68,10 +68,10 @@ async fn compact_table(
     Ok(())
 }
 
-pub async fn run(data: &Path, day: &str, budget: u64) -> Result<()> {
+pub async fn run(data: &Path, day: &str, r: &expire::Retention) -> Result<()> {
     let need = ["certs", "dns"].iter().map(|t| dir_size(&data.join(t).join(format!("day={day}")))).max().unwrap_or(0);
     if free_bytes(data).is_some_and(|f| f < need) {
-        expire::enforce(data, budget, Utc::now().date_naive())?;
+        expire::enforce(data, r, Utc::now().date_naive())?;
     }
     compact_table(data, "certs", certs_schema(), day, "ORDER BY primary_domain NULLS LAST, seen_at", &[("primary_domain", BLOOM_NDV)]).await?;
     compact_table(data, "sightings", sightings_schema(), day, "", &[]).await?;

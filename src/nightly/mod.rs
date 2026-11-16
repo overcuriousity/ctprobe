@@ -1,6 +1,7 @@
 //! Daily maintenance. Each step is recorded by a marker file and writes its
 //! output atomically, so a rerun after a crash repeats only unfinished work.
 
+pub mod archive;
 mod compact;
 mod domains;
 pub mod expire;
@@ -22,6 +23,20 @@ fn step_done(data: &Path, day: &str, step: &str) -> bool {
     marker(data, day, step).exists()
 }
 
+/// The days whose `step` is done, from one listing of the marker directory.
+pub fn days_done(data: &Path, step: &str) -> Vec<NaiveDate> {
+    let suffix = format!(".{step}");
+    std::fs::read_dir(data.join("nightly"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            NaiveDate::parse_from_str(n.strip_suffix(&suffix)?, "%Y-%m-%d").ok()
+        })
+        .collect()
+}
+
 fn mark(data: &Path, day: &str, step: &str) -> Result<()> {
     let p = marker(data, day, step);
     std::fs::create_dir_all(p.parent().unwrap())?;
@@ -38,15 +53,41 @@ pub async fn run_nightly(cfg: &Config, day: NaiveDate) -> Result<()> {
         mark(data, &d, "rollups")?;
     }
     if !step_done(data, &d, "compact") {
-        compact::run(data, &d, cfg.disk_budget_bytes).await?;
+        compact::run(data, &d, &cfg.retention()).await?;
         mark(data, &d, "compact")?;
     }
     if !step_done(data, &d, "domains") {
         domains::run(data, &d).await?;
         mark(data, &d, "domains")?;
     }
+    if let Some(budget) = cfg.archive_budget_bytes {
+        for (step, table) in [("archive", "certs"), ("archive-dns", "dns")] {
+            if step_done(data, &d, step) {
+                continue;
+            }
+            let outcome = match table {
+                "certs" => archive::certs(data, &d, budget).await?,
+                _ => archive::dns(data, &d, budget).await?,
+            };
+            match outcome {
+                archive::Outcome::Written { rows, bytes } => {
+                    mark(data, &d, step)?;
+                    let total = archive::archive_size(data);
+                    tracing::info!(
+                        "archive {total} bytes, {} bytes per row of {table} on {d}, {} days left",
+                        bytes / rows.max(1),
+                        archive::days_left(data, budget, total)
+                    );
+                }
+                archive::Outcome::Empty => mark(data, &d, step)?,
+                archive::Outcome::BudgetFull => {
+                    tracing::warn!("archive budget is full, {table} of {d} is not archived");
+                }
+            }
+        }
+    }
     cleanup(data)?;
-    expire::enforce(data, cfg.disk_budget_bytes, Utc::now().date_naive())?;
+    expire::enforce(data, &cfg.retention(), Utc::now().date_naive())?;
     Ok(())
 }
 
@@ -81,18 +122,24 @@ pub fn cleanup(data: &Path) -> Result<()> {
 }
 
 /// Finished days present on disk that the nightly job has not completed.
-pub fn pending_days(data: &Path, today: NaiveDate) -> Vec<NaiveDate> {
-    let mut out: Vec<NaiveDate> = std::fs::read_dir(data.join("certs"))
-        .into_iter()
-        .flatten()
-        .flatten()
+/// With `archive`, days whose archive step is unfinished are pending too, and
+/// a day that holds only `dns` counts, so that it is archived and can age out.
+pub fn pending_days(data: &Path, today: NaiveDate, archive: bool) -> Vec<NaiveDate> {
+    let tables: &[&str] = if archive { &["certs", "dns"] } else { &["certs"] };
+    let mut out: Vec<NaiveDate> = tables
+        .iter()
+        .flat_map(|t| std::fs::read_dir(data.join(t)).into_iter().flatten().flatten())
         .filter_map(|e| {
             let n = e.file_name().to_string_lossy().into_owned();
             NaiveDate::parse_from_str(n.strip_prefix("day=")?, "%Y-%m-%d").ok()
         })
-        .filter(|d| *d < today && !step_done(data, &d.format("%Y-%m-%d").to_string(), "domains"))
+        .filter(|d| {
+            let s = d.format("%Y-%m-%d").to_string();
+            *d < today && (!step_done(data, &s, "domains") || (archive && !(step_done(data, &s, "archive") && step_done(data, &s, "archive-dns"))))
+        })
         .collect();
     out.sort();
+    out.dedup();
     out
 }
 

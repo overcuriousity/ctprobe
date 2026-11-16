@@ -189,3 +189,25 @@ schema!(dns_minute_schema, [
     ("found_later", Int64, true),
     ("queries", Int64, true),
 ]);
+
+schema!(archive_certs_schema, [
+    ("reg_domain", Utf8, false),
+    ("names", list(), false),
+    ("seen_at", ts(), false),
+    ("not_before", ts(), false),
+    ("not_after", ts(), false),
+    ("issuer_cn", Utf8, false),
+    ("issuer_org", Utf8, false),
+    ("log_id", Int32, false),
+    ("entry_index", Int64, false),
+    ("primary_domain", Utf8, true),
+]);
+
+schema!(archive_dns_schema, [
+    ("reg_domain", Utf8, false),
+    ("name", Utf8, false),
+    ("probed_at", ts(), false),
+    ("status", Utf8, false),
+    ("v4", list(), false),
+    ("v6", list(), false),
+]);

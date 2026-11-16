@@ -5,6 +5,7 @@ pub mod api;
 pub mod csv;
 mod sse;
 pub mod trends;
+mod v1;
 
 use crate::pipeline::PipelineHandle;
 use crate::query::QueryEngine;
@@ -32,6 +33,7 @@ pub struct AppState {
     pub pipe: PipelineHandle,
     pub client: reqwest::Client,
     pub sse_clients: Arc<AtomicUsize>,
+    pub v1: Arc<v1::Gate>,
 }
 
 impl AppState {
@@ -40,7 +42,9 @@ impl AppState {
             .timeout(std::time::Duration::from_secs(20))
             .build()
             .expect("HTTP client");
-        AppState { engine, pipe, client, sse_clients: Arc::new(AtomicUsize::new(0)) }
+        AppState { engine, pipe, client, sse_clients: Arc::new(AtomicUsize::new(0)),
+            v1: Arc::new(v1::Gate::new()),
+        }
     }
 }
 
@@ -91,6 +95,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/search", get(api::search))
         .route("/api/certs", get(api::certs))
         .route("/api/cert/{log}/{index}", get(api::cert))
+        .nest("/api/v1", v1::router())
         .with_state(state)
         .layer(SetResponseHeaderLayer::overriding(
             header::CONTENT_SECURITY_POLICY,

@@ -13,7 +13,7 @@ use crate::dns::{self, DnsLink, DnsOpts, DnsOut, DnsStats};
 use crate::fetch::{spawn_fetcher, Batch, FetchOpts, LogStats};
 use crate::history::{Counts, History};
 use crate::loghealth::{LogSample, LogWindow};
-use crate::metrics::{dir_size, proc_stats, FeedItem, LiveState, PipelineLoad};
+use crate::metrics::{hot_size, proc_stats, FeedItem, LiveState, PipelineLoad};
 use crate::nightly;
 use crate::parse::extract;
 use crate::positions::{open_db, Positions};
@@ -277,7 +277,7 @@ impl Pipeline {
             let t = tokio::spawn(async move {
                 loop {
                     let today = chrono::Utc::now().date_naive();
-                    for day in nightly::pending_days(&cfg2.data_dir, today) {
+                    for day in nightly::pending_days(&cfg2.data_dir, today, cfg2.archive_budget_bytes.is_some()) {
                         tracing::info!("nightly job for {day}");
                         if let Err(e) = nightly::run_nightly(&cfg2, day).await {
                             tracing::error!("nightly job for {day} failed: {e:#}");
@@ -786,7 +786,7 @@ impl Worker {
             self.writer.push_rollup(row);
         }
         let (cpu, rss) = proc_stats();
-        let disk = dir_size(&self.cfg.data_dir);
+        let disk = hot_size(&self.cfg.data_dir);
         self.live.disk_bytes.store(disk, Ordering::Relaxed);
         let row = RollupMinuteRow {
             minute_ms,
@@ -830,7 +830,7 @@ impl Worker {
         let budget = self.cfg.disk_budget_bytes;
         let reason = if size > budget {
             let today = chrono::Utc::now().date_naive();
-            nightly::expire::enforce(&self.cfg.data_dir, budget, today)?
+            nightly::expire::enforce(&self.cfg.data_dir, &self.cfg.retention(), today)?
         } else {
             None
         };
