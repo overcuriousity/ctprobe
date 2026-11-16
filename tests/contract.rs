@@ -186,6 +186,14 @@ async fn ok(a: &App, path: &str, want: Value) {
     assert_eq!(shape(&v), want, "{path}: {v}");
 }
 
+/// A 200 CSV response: asserts the content type and returns the first line.
+async fn csv_header(a: &App, path: &str) -> String {
+    let r = reqwest::get(format!("{}{path}", a.base)).await.unwrap();
+    assert_eq!(r.status(), 200, "{path}");
+    assert_eq!(r.headers()["content-type"], "text/csv; charset=utf-8", "{path}");
+    r.text().await.unwrap().lines().next().unwrap().to_string()
+}
+
 /// A JSON error response: `{"error": "string"}` with the given status.
 async fn err(a: &App, path: &str, status: u16) {
     let v = fetch(a, path, status, "application/json").await;
@@ -372,6 +380,7 @@ async fn contract_sql() {
     ok(&a, "/api/sql?q=SELECT%201%20AS%20x", json!({"columns": ["string"], "rows": [["number"]], "truncated": "bool"})).await;
     let v = fetch(&a, "/api/sql?q=SELECT%201%20AS%20x,%20%27y%27%20AS%20z", 200, "application/json").await;
     assert_eq!(cells(&v["rows"][0]), json!(["number", "string"]), "{v}");
+    assert_eq!(csv_header(&a, "/api/sql?q=SELECT%201%20AS%20x&format=csv").await, "x");
     err(&a, "/api/sql?q=DROP%20TABLE%20certs", 400).await;
     err(&a, "/api/sql?q=SELEC", 400).await;
     a.pipe.shutdown().await.unwrap();
@@ -489,6 +498,7 @@ async fn contract_trends() {
     let v = fetch(&a, "/api/trends/issuers", 200, "application/json").await;
     assert_eq!(shape(&v), json!({"columns": ["string"], "rows": [["string"]], "truncated": "bool"}), "{v}");
     assert_eq!(cells(&v["rows"][0]), json!(["string", "number"]), "{v}");
+    assert_eq!(csv_header(&a, "/api/trends/issuers?format=csv").await, "k,certs");
     err(&a, "/api/trends/nope", 404).await;
     err(&a, "/api/trends/issuers?bucket=week", 400).await;
     a.pipe.shutdown().await.unwrap();
