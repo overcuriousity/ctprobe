@@ -31,7 +31,7 @@ struct TimedOut;
 
 impl Clock {
     fn tick(&mut self) -> Result<()> {
-        if self.seen % CHECK_EVERY == 0 && Instant::now() >= self.until {
+        if self.seen.is_multiple_of(CHECK_EVERY) && Instant::now() >= self.until {
             return Err(TimedOut.into());
         }
         self.seen += 1;
@@ -64,6 +64,7 @@ pub(super) struct SearchIndex {
     stamp: SystemTime,
 }
 
+#[allow(unsafe_code)]
 fn mmap(p: &Path) -> Result<Mmap> {
     // Files are replaced by rename, never modified in place.
     Ok(unsafe { Mmap::map(&std::fs::File::open(p)?)? })

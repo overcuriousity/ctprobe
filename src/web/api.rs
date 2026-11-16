@@ -150,6 +150,8 @@ fn parse_when(s: &str, end: bool) -> Option<i64> {
     Some(if end { t + 86_399_999 } else { t })
 }
 
+// The error is the finished response, returned as it is.
+#[allow(clippy::result_large_err)]
 fn when(v: Option<String>, end: bool, name: &str) -> Result<Option<i64>, Response> {
     match v.filter(|s| !s.is_empty()) {
         None => Ok(None),
@@ -159,6 +161,7 @@ fn when(v: Option<String>, end: bool, name: &str) -> Result<Option<i64>, Respons
     }
 }
 
+#[allow(clippy::result_large_err)]
 pub async fn certs(State(s): State<AppState>, Query(q): Query<CertsQuery>) -> Response {
     let some = |v: Option<String>| v.filter(|s| !s.is_empty());
     let scope = match (some(q.domain), some(q.pattern)) {

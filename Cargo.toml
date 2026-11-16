@@ -1,10 +1,14 @@
 [package]
 name = "ctprobe"
-version = "0.1.0"
+version = "0.0.0"
 edition = "2021"
+rust-version = "1.99"
 description = "Measures the Certificate Transparency ecosystem in real time and searches recent certificates"
 license = "MIT"
 repository = "https://github.com/overcuriousity/ctprobe"
+
+[lints.rust]
+unsafe_code = "deny"
 
 [features]
 default = []

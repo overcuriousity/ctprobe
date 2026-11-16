@@ -2,7 +2,8 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "ctprobe", about = "Certificate Transparency measurement service")]
+// Release builds are stamped by CI; the version in Cargo.toml is a placeholder.
+#[command(name = "ctprobe", version = option_env!("CTPROBE_VERSION").unwrap_or("dev"), about = "Certificate Transparency measurement service")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,

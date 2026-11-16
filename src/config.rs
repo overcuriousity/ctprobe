@@ -194,7 +194,7 @@ mod tests {
     use super::*;
     #[test]
     fn loads_example_config() {
-        let c = Config::load(std::path::Path::new("ctprobe.example.toml")).unwrap();
+        let c = Config::load(std::path::Path::new("config.example.toml")).unwrap();
         assert_eq!(c.bind.to_string(), "0.0.0.0:8080");
         assert_eq!(c.disk_budget_bytes, 4294967296);
         assert_eq!(c.tracker_max_bytes, 2147483648);

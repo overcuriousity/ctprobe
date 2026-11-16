@@ -339,6 +339,7 @@ fn kind_name(l: &LogInfo) -> &'static str {
 }
 
 /// Process CPU time in milliseconds and resident bytes, from `/proc`.
+#[allow(unsafe_code)]
 pub fn proc_stats() -> (u64, u64) {
     let clk = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
     let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(1) as u64;

@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 use ctprobe::mocklog::{MockEntry, MockLog, MockOpts, TestCa};
 use ctprobe::positions::{open_db, Positions};
 use ctprobe::store::list_parts;

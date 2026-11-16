@@ -35,6 +35,7 @@ pub(super) fn props(bloom: &[(&str, u64)]) -> WriterProperties {
     b.build()
 }
 
+#[allow(unsafe_code)]
 fn free_bytes(p: &Path) -> Option<u64> {
     let c = std::ffi::CString::new(p.to_string_lossy().as_bytes()).ok()?;
     let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
