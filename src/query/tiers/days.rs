@@ -1,8 +1,9 @@
 //! The per-tier readers of one day, and the rows they build.
 
+use super::walk::{day_bounds, Got, Left};
 use super::{CertCursor, Scope};
 use crate::nightly::archive::names_of;
-use crate::query::sql::{quote, to_result, QueryResult, MEMORY, MS_PER_DAY, PARTITIONS};
+use crate::query::sql::{quote, to_result, QueryResult, MEMORY, PARTITIONS};
 use crate::query::{QueryEngine, QueryError};
 use crate::store::{archive_certs_schema, certs_schema, day_string, list_day, register_files, session};
 use arrow::datatypes::{DataType, SchemaRef};
@@ -26,16 +27,6 @@ pub(super) enum Start {
     Cursor(CertCursor),
     /// After the last row a query returned.
     After(CertCursor),
-}
-
-/// What one query of a day gave: rows in page order, how many rows SQL
-/// returned, and where the next query of the day starts. `cut` means the
-/// deadline passed while the rows were being completed.
-pub(super) struct Got {
-    pub(super) rows: Vec<Value>,
-    pub(super) returned: usize,
-    pub(super) next: Option<CertCursor>,
-    pub(super) cut: bool,
 }
 
 /// Columns of a schema, with timestamps as milliseconds.
@@ -100,8 +91,8 @@ impl QueryEngine {
         start: Option<&Start>,
         n: usize,
         t: Duration,
-        left: &mut (dyn FnMut() -> Option<Duration> + Send),
-    ) -> Result<Got, QueryError> {
+        left: Left<'_>,
+    ) -> Result<Got<CertCursor>, QueryError> {
         let mut conds = scope.conditions(day, format!("reg_domain IN ({})", scope.list()), true);
         if let Some(Start::Cursor(c) | Start::After(c)) = start {
             conds.push(c.sql(&format!("reg_domain > {}", quote(&c.reg_domain))));
@@ -114,7 +105,7 @@ impl QueryEngine {
         let found = objects(self.run_archive(files.to_vec(), archive_certs_schema(), sql, n, t).await?);
         let mut hot = HashMap::new();
         let mut cut = false;
-        let (lo, hi) = (day * MS_PER_DAY, day * MS_PER_DAY + MS_PER_DAY - 1);
+        let (lo, hi) = day_bounds(day);
         let is_hot = !list_day(&self.data, "certs", &day_string(lo)).is_empty();
         if !found.is_empty() && is_hot {
             let list = |v: BTreeSet<String>| v.into_iter().collect::<Vec<_>>().join(", ");
@@ -163,7 +154,7 @@ impl QueryEngine {
         start: Option<&Start>,
         n: usize,
         t: Duration,
-    ) -> Result<Got, QueryError> {
+    ) -> Result<Got<CertCursor>, QueryError> {
         let mut conds = scope.conditions(day, format!("array_has_any(reg_domains, make_array({}))", scope.list()), false);
         match start {
             Some(Start::Cursor(c)) => conds.push(c.sql("TRUE")),
@@ -175,7 +166,7 @@ impl QueryEngine {
             columns(certs_schema()),
             conds.join(" AND ")
         );
-        let (lo, hi) = (day * MS_PER_DAY, day * MS_PER_DAY + MS_PER_DAY - 1);
+        let (lo, hi) = day_bounds(day);
         let found = objects(self.run_within(sql, n, Some(lo), Some(hi), t).await?);
         let wanted: HashSet<&str> = scope.domains.iter().map(String::as_str).collect();
         let strs = |o: &Map<String, Value>, k: &str| -> Vec<String> {

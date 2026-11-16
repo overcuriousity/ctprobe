@@ -4,19 +4,20 @@
 
 mod days;
 mod dns;
+mod walk;
 
-use super::sql::{days_of, quote, MS_PER_DAY};
+use super::sql::{quote, MS_PER_DAY};
 use super::{QueryEngine, QueryError};
-use crate::store::{archive_days, list_archive};
-use std::path::PathBuf;
+use crate::store::list_archive;
 use base64::Engine;
 use days::Start;
 pub use dns::DnsCursor;
 use serde::Serialize;
 use serde_json::Value;
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, HashSet};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
+use walk::{DayFetch, Days, Got, Left};
 
 const BASE64: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
 const WILDCARD_RE: &str = r"'(^| )\*\.'";
@@ -148,25 +149,6 @@ impl Scope<'_> {
 }
 
 impl QueryEngine {
-    /// The archive's files by day, and the days with hot files, of `table`.
-    /// Directory listings and footers: blocking reads, kept off the web
-    /// workers and bounded by `t`.
-    async fn list_days(
-        &self,
-        table: &'static str,
-        ts: &'static str,
-        from: Option<i64>,
-        to: Option<i64>,
-        t: Duration,
-    ) -> Result<(BTreeMap<i64, Vec<PathBuf>>, Vec<i64>), QueryError> {
-        let data = self.data.clone();
-        let job = self.rt.spawn_blocking(move || (archive_days(&data, table, ts), days_of(&data, table, from, to)));
-        tokio::time::timeout(t, job)
-            .await
-            .map_err(|_| QueryError::Timeout)?
-            .map_err(|e| QueryError::Failed(e.to_string()))
-    }
-
     /// True when the certificate archive holds a file.
     pub fn has_cert_archive(&self) -> bool {
         !list_archive(&self.data, "certs").is_empty()
@@ -207,69 +189,58 @@ impl QueryEngine {
             exact: exact_name.map(|n| (n, format!("*.{}", n.split_once('.').map_or(n, |(_, p)| p)))),
             f,
         };
-        let want = limit + 1;
-        let mut out: Vec<Value> = Vec::new();
-        let mut cut_short = false;
-        let (archive, mut days) = if scope.domains.is_empty() {
-            (BTreeMap::new(), vec![])
-        } else {
-            // Directory listings and footers: blocking reads, kept off the web workers.
-            let t = left().ok_or(QueryError::Timeout)?;
-            self.list_days("certs", "seen_at", f.from_ms, f.to_ms, t).await?
-        };
-        let in_range = |d: &i64| {
-            f.from_ms.is_none_or(|t| *d >= t.div_euclid(MS_PER_DAY)) && f.to_ms.is_none_or(|t| *d <= t.div_euclid(MS_PER_DAY))
-        };
-        days.extend(archive.keys().copied().filter(in_range));
-        days.retain(|d| after.as_ref().is_none_or(|c| *d <= c.day()));
-        days.sort_unstable_by(|a, b| b.cmp(a));
-        days.dedup();
-        'days: for day in days {
-            let mut start = after.clone().filter(|c| c.day() == day).map(Start::Cursor);
-            let mut seen = HashSet::new();
-            loop {
-                let Some(t) = left() else {
-                    cut_short = true;
-                    break 'days;
-                };
-                let n = want - out.len();
-                let got = match archive.get(&day) {
-                    Some(files) => self.archive_day(&scope, day, files, start.as_ref(), n, t, &mut *left).await,
-                    None => self.hot_day(&scope, day, start.as_ref(), n, t).await,
-                };
-                let got = match got {
-                    Ok(g) => g,
-                    Err(QueryError::Timeout) => {
-                        cut_short = true;
-                        break 'days;
-                    }
-                    Err(e) => return Err(e),
-                };
-                out.extend(got.rows.into_iter().filter(|r| {
-                    scope.keeps(r)
-                        && after.as_ref().is_none_or(|c| rank(r) > c.rank())
-                        && seen.insert(CertCursor::of(r).encode())
-                }));
-                if got.cut {
-                    cut_short = true;
-                    break 'days;
-                }
-                if out.len() >= want {
-                    break 'days;
-                }
-                match got.next {
-                    Some(c) if got.returned >= n => start = Some(Start::After(c)),
-                    _ => break,
-                }
-            }
+        let days = Days { table: "certs", ts: "seen_at", from: f.from_ms, to: f.to_ms, skip: scope.domains.is_empty() };
+        self.walk_days(&CertFetch { engine: self, scope: &scope }, days, limit, after, left).await
+    }
+}
+
+/// The certificate walk's per-day reads.
+struct CertFetch<'a> {
+    engine: &'a QueryEngine,
+    scope: &'a Scope<'a>,
+}
+
+impl DayFetch for CertFetch<'_> {
+    type Cursor = CertCursor;
+    type Start = Start;
+
+    fn cursor_of(row: &Value) -> CertCursor {
+        CertCursor::of(row)
+    }
+
+    fn encode(c: &CertCursor) -> String {
+        c.encode()
+    }
+
+    fn day(c: &CertCursor) -> i64 {
+        c.day()
+    }
+
+    fn first(c: CertCursor) -> Start {
+        Start::Cursor(c)
+    }
+
+    fn resume(c: CertCursor) -> Start {
+        Start::After(c)
+    }
+
+    fn keep(&self, row: &Value, after: Option<&CertCursor>) -> bool {
+        self.scope.keeps(row) && after.is_none_or(|c| rank(row) > c.rank())
+    }
+
+    async fn day_rows(
+        &self,
+        day: i64,
+        files: Option<&[PathBuf]>,
+        start: Option<&Start>,
+        n: usize,
+        t: Duration,
+        left: Left<'_>,
+    ) -> Result<Got<CertCursor>, QueryError> {
+        match files {
+            Some(files) => self.engine.archive_day(self.scope, day, files, start, n, t, left).await,
+            None => self.engine.hot_day(self.scope, day, start, n, t).await,
         }
-        if cut_short && out.is_empty() {
-            return Err(QueryError::Timeout);
-        }
-        let more = out.len() > limit || cut_short;
-        out.truncate(limit);
-        let next_cursor = out.last().filter(|_| more).map(|r| CertCursor::of(r).encode());
-        Ok(TierPage { rows: out, next_cursor, cut_short })
     }
 }
 

@@ -4,6 +4,7 @@
 //! day's rows do not change when it is archived.
 
 use super::days::{columns, objects};
+use super::walk::{day_bounds, DayFetch, Days, Got, Left};
 use super::{TierPage, BASE64};
 use crate::nightly::archive::DNS_CHANGES_SQL;
 use crate::query::sql::{quote, MS_PER_DAY};
@@ -12,7 +13,6 @@ use crate::store::{archive_dns_schema, day_string, list_archive, list_day};
 use base64::Engine;
 use serde_json::{Map, Value};
 use std::cmp::Reverse;
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -70,6 +70,58 @@ fn row(tier: &str, mut o: Map<String, Value>) -> Value {
     Value::Object(out)
 }
 
+/// The address walk's per-day reads.
+struct DnsFetch<'a> {
+    engine: &'a QueryEngine,
+    reg: &'a str,
+}
+
+impl DayFetch for DnsFetch<'_> {
+    type Cursor = DnsCursor;
+    type Start = DnsCursor;
+
+    fn cursor_of(row: &Value) -> DnsCursor {
+        DnsCursor::of(row)
+    }
+
+    fn encode(c: &DnsCursor) -> String {
+        c.encode()
+    }
+
+    fn day(c: &DnsCursor) -> i64 {
+        c.day()
+    }
+
+    fn first(c: DnsCursor) -> DnsCursor {
+        c
+    }
+
+    fn resume(c: DnsCursor) -> DnsCursor {
+        c
+    }
+
+    fn keep(&self, row: &Value, after: Option<&DnsCursor>) -> bool {
+        after.is_none_or(|c| rank(row) > c.rank())
+    }
+
+    async fn day_rows(
+        &self,
+        day: i64,
+        files: Option<&[PathBuf]>,
+        start: Option<&DnsCursor>,
+        n: usize,
+        t: Duration,
+        _left: Left<'_>,
+    ) -> Result<Got<DnsCursor>, QueryError> {
+        let rows = match files {
+            Some(files) => self.engine.archive_dns_day(self.reg, day, files, start, n, t).await?,
+            None => self.engine.hot_dns_day(self.reg, day, start, n, t).await?,
+        };
+        let next = rows.last().map(DnsCursor::of);
+        Ok(Got { returned: rows.len(), rows, next, cut: false })
+    }
+}
+
 impl QueryEngine {
     /// True when the DNS archive holds a file.
     pub fn has_dns_archive(&self) -> bool {
@@ -96,60 +148,11 @@ impl QueryEngine {
         reg: &str,
         limit: usize,
         after: Option<DnsCursor>,
-        left: &mut (dyn FnMut() -> Option<Duration> + Send),
+        left: Left<'_>,
     ) -> Result<TierPage, QueryError> {
-        let want = limit + 1;
-        let mut out: Vec<Value> = Vec::new();
-        let mut cut_short = false;
-        let t = left().ok_or(QueryError::Timeout)?;
-        let (archive, mut days) = self.list_days("dns", "probed_at", None, None, t).await?;
-        days.extend(archive.keys().copied());
-        days.retain(|d| after.as_ref().is_none_or(|c| *d <= c.day()));
-        days.sort_unstable_by(|a, b| b.cmp(a));
-        days.dedup();
-        'days: for day in days {
-            let mut start = after.clone().filter(|c| c.day() == day);
-            // A (probed_at, name) pair is one position, whatever else differs.
-            let mut seen = HashSet::new();
-            loop {
-                let Some(t) = left() else {
-                    cut_short = true;
-                    break 'days;
-                };
-                let n = want - out.len();
-                let got = match archive.get(&day) {
-                    Some(files) => self.archive_dns_day(reg, day, files, start.as_ref(), n, t).await,
-                    None => self.hot_dns_day(reg, day, start.as_ref(), n, t).await,
-                };
-                let got = match got {
-                    Ok(g) => g,
-                    Err(QueryError::Timeout) => {
-                        cut_short = true;
-                        break 'days;
-                    }
-                    Err(e) => return Err(e),
-                };
-                let returned = got.len();
-                let last = got.last().map(DnsCursor::of);
-                out.extend(got.into_iter().filter(|r| {
-                    after.as_ref().is_none_or(|c| rank(r) > c.rank()) && seen.insert(DnsCursor::of(r).encode())
-                }));
-                if out.len() >= want {
-                    break 'days;
-                }
-                match last {
-                    Some(c) if returned >= n => start = Some(c),
-                    _ => break,
-                }
-            }
-        }
-        if cut_short && out.is_empty() {
-            return Err(QueryError::Timeout);
-        }
-        let more = out.len() > limit || cut_short;
-        out.truncate(limit);
-        let next_cursor = out.last().filter(|_| more).map(|r| DnsCursor::of(r).encode());
-        Ok(TierPage { rows: out, next_cursor, cut_short })
+        let days = Days { table: "dns", ts: "probed_at", from: None, to: None, skip: false };
+        let fetch = DnsFetch { engine: self, reg };
+        self.walk_days(&fetch, days, limit, after, left).await
     }
 
     /// One day from its archive file, outside the limiter. The day is `hot`
@@ -163,7 +166,7 @@ impl QueryEngine {
         n: usize,
         t: Duration,
     ) -> Result<Vec<Value>, QueryError> {
-        let (lo, hi) = (day * MS_PER_DAY, day * MS_PER_DAY + MS_PER_DAY - 1);
+        let (lo, hi) = day_bounds(day);
         let mut conds = vec![format!("reg_domain = {}", quote(reg)), format!("CAST(probed_at AS BIGINT) BETWEEN {lo} AND {hi}")];
         conds.extend(start.map(DnsCursor::sql));
         let sql = format!(
@@ -187,7 +190,7 @@ impl QueryEngine {
         n: usize,
         t: Duration,
     ) -> Result<Vec<Value>, QueryError> {
-        let (lo, hi) = (day * MS_PER_DAY, day * MS_PER_DAY + MS_PER_DAY - 1);
+        let (lo, hi) = day_bounds(day);
         let after = start.map(|c| format!(" WHERE {}", c.sql())).unwrap_or_default();
         let sql = format!(
             "WITH t AS (SELECT * FROM dns WHERE reg_domain = {}) SELECT {} FROM ({DNS_CHANGES_SQL}) c{after} ORDER BY {NEWEST} LIMIT {n}",
