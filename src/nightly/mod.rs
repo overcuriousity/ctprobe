@@ -47,20 +47,27 @@ pub async fn run_nightly(cfg: &Config, day: NaiveDate) -> Result<()> {
         mark(data, &d, "domains")?;
     }
     if let Some(budget) = cfg.archive_budget_bytes {
-        if !step_done(data, &d, "archive") {
-            match archive::certs(data, &d, budget).await? {
+        for (step, table) in [("archive", "certs"), ("archive-dns", "dns")] {
+            if step_done(data, &d, step) {
+                continue;
+            }
+            let outcome = match table {
+                "certs" => archive::certs(data, &d, budget).await?,
+                _ => archive::dns(data, &d, budget).await?,
+            };
+            match outcome {
                 archive::Outcome::Written { rows, bytes } => {
-                    mark(data, &d, "archive")?;
+                    mark(data, &d, step)?;
                     let total = archive::archive_size(data);
                     tracing::info!(
-                        "archive {total} bytes, {} bytes per row on {d}, {} days left",
+                        "archive {total} bytes, {} bytes per row of {table} on {d}, {} days left",
                         bytes / rows.max(1),
                         archive::days_left(data, budget, total)
                     );
                 }
-                archive::Outcome::Empty => mark(data, &d, "archive")?,
+                archive::Outcome::Empty => mark(data, &d, step)?,
                 archive::Outcome::BudgetFull => {
-                    tracing::warn!("archive budget is full, {d} is not archived");
+                    tracing::warn!("archive budget is full, {table} of {d} is not archived");
                 }
             }
         }
@@ -113,7 +120,7 @@ pub fn pending_days(data: &Path, today: NaiveDate, archive: bool) -> Vec<NaiveDa
         })
         .filter(|d| {
             let s = d.format("%Y-%m-%d").to_string();
-            *d < today && (!step_done(data, &s, "domains") || (archive && !step_done(data, &s, "archive")))
+            *d < today && (!step_done(data, &s, "domains") || (archive && !(step_done(data, &s, "archive") && step_done(data, &s, "archive-dns"))))
         })
         .collect();
     out.sort();

@@ -5,7 +5,10 @@ use super::compact::{props, BLOOM_NDV};
 use super::{MEMORY, PARTITIONS};
 use crate::metrics::dir_size;
 use crate::names::registered_domain;
-use crate::store::{archive_certs_schema, archive_file, list_archive, list_day, register_files, session};
+use crate::store::{
+    archive_certs_schema, archive_dns_schema, archive_file, dns_schema, list_archive, list_day, register_files,
+    session,
+};
 use anyhow::{Context, Result};
 use arrow::array::{
     Array, ArrayRef, AsArray, Int32Builder, Int64Builder, ListBuilder, RecordBatch, StringBuilder,
@@ -16,6 +19,7 @@ use futures::StreamExt;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::metadata::ParquetMetaDataReader;
 use parquet::arrow::{ArrowWriter, ProjectionMask};
+use arrow::datatypes::SchemaRef;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -152,13 +156,87 @@ fn expand(files: &[std::path::PathBuf], out: &Path) -> Result<u64> {
     Ok(total)
 }
 
+/// The rename makes a file at the final path complete, so the day is done.
+fn finished(dest: &Path) -> Result<Option<Outcome>> {
+    if !dest.exists() {
+        return Ok(None);
+    }
+    let meta = ParquetMetaDataReader::new().parse_and_finish(&std::fs::File::open(dest)?)?;
+    let rows = meta.file_metadata().num_rows() as u64;
+    Ok(Some(Outcome::Written { rows, bytes: std::fs::metadata(dest)?.len() }))
+}
+
+/// Streams the query result into `dest` through `<dest>.tmp`, sorted data
+/// with a bloom filter on `reg_domain`. Returns the rows written; with none,
+/// no file is left behind.
+async fn write_query(
+    ctx: &datafusion::prelude::SessionContext,
+    sql: &str,
+    schema: SchemaRef,
+    dest: &Path,
+) -> Result<u64> {
+    std::fs::create_dir_all(dest.parent().unwrap())?;
+    let tmp = dest.with_extension("parquet.tmp");
+    let mut stream = ctx.sql(sql).await?.execute_stream().await?;
+    let mut w = ArrowWriter::try_new(
+        std::fs::File::create(&tmp)?,
+        schema.clone(),
+        Some(props(&[("reg_domain", BLOOM_NDV)])),
+    )?;
+    let mut rows = 0u64;
+    while let Some(b) = stream.next().await {
+        let b = b.context("archive query")?;
+        rows += b.num_rows() as u64;
+        w.write(&RecordBatch::try_new(schema.clone(), b.columns().to_vec())?)?;
+    }
+    if rows == 0 {
+        drop(w);
+        std::fs::remove_file(&tmp)?;
+        return Ok(0);
+    }
+    w.into_inner()?.sync_all()?;
+    std::fs::rename(&tmp, dest)?;
+    Ok(rows)
+}
+
+/// Per name, the first answer of the day and every later one whose status or
+/// address sets differ from the answer before it. Reads a table `t` shaped
+/// like `dns`; the reduction is per name over all of `t`, so an outer filter
+/// on `reg_domain` is safe.
+pub const DNS_CHANGES_SQL: &str = "SELECT reg_domain, name, probed_at, status, v4, v6 FROM (
+  SELECT *, ROW_NUMBER() OVER w AS rn,
+         LAG(status || '|' || array_to_string(array_sort(v4), ',') || '|' || array_to_string(array_sort(v6), ','))
+           OVER w AS prev,
+         status || '|' || array_to_string(array_sort(v4), ',') || '|' || array_to_string(array_sort(v6), ',') AS cur
+  FROM t WHERE kind = 'name' AND reg_domain IS NOT NULL
+  WINDOW w AS (PARTITION BY name ORDER BY probed_at, attempt)
+) WHERE rn = 1 OR cur <> prev
+ORDER BY reg_domain, name, probed_at";
+
+pub async fn dns(data: &Path, day: &str, budget: u64) -> Result<Outcome> {
+    let dest = archive_file(data, "dns", day);
+    if let Some(done) = finished(&dest)? {
+        return Ok(done);
+    }
+    if archive_size(data) >= budget {
+        return Ok(Outcome::BudgetFull);
+    }
+    let files = list_day(data, "dns", day);
+    if files.is_empty() {
+        return Ok(Outcome::Empty);
+    }
+    let ctx = session(data, MEMORY, PARTITIONS)?;
+    register_files(&ctx, "t", dns_schema(), &files).await?;
+    match write_query(&ctx, DNS_CHANGES_SQL, archive_dns_schema(), &dest).await? {
+        0 => Ok(Outcome::Empty),
+        rows => Ok(Outcome::Written { rows, bytes: std::fs::metadata(&dest)?.len() }),
+    }
+}
+
 pub async fn certs(data: &Path, day: &str, budget: u64) -> Result<Outcome> {
-    // The rename makes a file at the final path complete, so the day is done.
     let dest = archive_file(data, "certs", day);
-    if dest.exists() {
-        let meta = ParquetMetaDataReader::new().parse_and_finish(&std::fs::File::open(&dest)?)?;
-        let rows = meta.file_metadata().num_rows() as u64;
-        return Ok(Outcome::Written { rows, bytes: std::fs::metadata(&dest)?.len() });
+    if let Some(done) = finished(&dest)? {
+        return Ok(done);
     }
     if archive_size(data) >= budget {
         return Ok(Outcome::BudgetFull);
@@ -176,24 +254,10 @@ pub async fn certs(data: &Path, day: &str, budget: u64) -> Result<Outcome> {
         return Ok(Outcome::Empty);
     }
 
-    std::fs::create_dir_all(dest.parent().unwrap())?;
-    let tmp = dest.with_extension("parquet.tmp");
     let schema = archive_certs_schema();
     let ctx = session(data, MEMORY, PARTITIONS)?;
     register_files(&ctx, "t", schema.clone(), std::slice::from_ref(&unsorted)).await?;
-    let mut stream =
-        ctx.sql("SELECT * FROM t ORDER BY reg_domain, seen_at").await?.execute_stream().await?;
-    let mut w = ArrowWriter::try_new(
-        std::fs::File::create(&tmp)?,
-        schema.clone(),
-        Some(props(&[("reg_domain", BLOOM_NDV)])),
-    )?;
-    while let Some(b) = stream.next().await {
-        let b = b.context("archive query")?;
-        w.write(&RecordBatch::try_new(schema.clone(), b.columns().to_vec())?)?;
-    }
-    w.into_inner()?.sync_all()?;
-    std::fs::rename(&tmp, &dest)?;
+    write_query(&ctx, "SELECT * FROM t ORDER BY reg_domain, seen_at", schema, &dest).await?;
     std::fs::remove_file(&unsorted)?;
     Ok(Outcome::Written { rows, bytes: std::fs::metadata(&dest)?.len() })
 }

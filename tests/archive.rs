@@ -238,6 +238,206 @@ async fn enabled_run_writes_file_and_marker() {
     assert!(d.path().join("nightly").join(format!("{DAY}.archive")).exists());
 }
 
+mod dns_archive {
+    use super::*;
+    use ctprobe::dns::outcome::{Lookup, Status};
+    use ctprobe::dns::queue::Kind;
+    use ctprobe::dns::state::{Diff, Last};
+    use ctprobe::dns::DnsRow;
+    use std::net::Ipv4Addr;
+
+    fn ips(v: &[&str]) -> Vec<Ipv4Addr> {
+        v.iter().map(|a| a.parse().unwrap()).collect()
+    }
+
+    fn probe(name: &str, reg: Option<&str>, kind: Kind, at: i64, attempt: u8, status: Status, v4: &[&str]) -> DnsRow {
+        let v4 = ips(v4);
+        let lookup = Lookup { status, v4, v6: vec![], cnames: vec![], ttl: Some(60) };
+        DnsRow {
+            probed_at_ms: D + at,
+            name: name.into(),
+            kind,
+            reg_domain: reg.map(str::to_string),
+            cert_hash: 1,
+            cert_seen_at_ms: D,
+            attempt,
+            renewal: "new",
+            lookup,
+            latency_ms: 5,
+            last_miss_ms: None,
+            prev: None,
+        }
+    }
+
+    fn ok(name: &str, at: i64, v4: &[&str]) -> DnsRow {
+        let reg = name.split_once('.').map(|x| x.1).unwrap_or(name);
+        probe(name, Some(reg), Kind::Name, at, 0, Status::Resolved, v4)
+    }
+
+    fn seed_dns(dir: &Path, rows: Vec<DnsRow>) {
+        let mut w = Writer::open(dir, 0).unwrap();
+        for r in rows {
+            w.push_dns(r);
+        }
+        w.flush(1).unwrap();
+        w.publish(1).unwrap();
+    }
+
+    async fn archived(rows: Vec<DnsRow>) -> (tempfile::TempDir, RecordBatch) {
+        let d = tempfile::tempdir().unwrap();
+        seed_dns(d.path(), rows);
+        let o = archive::dns(d.path(), DAY, u64::MAX).await.unwrap();
+        assert!(matches!(o, Outcome::Written { .. }), "{o:?}");
+        let b = read_file(&archive_file(d.path(), "dns", DAY));
+        (d, b)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn first_answer_of_the_day_is_kept() {
+        let mut r = ok("www.a.com", 1, &["1.1.1.1"]);
+        let l = Last::of(&r.lookup, 0);
+        let diff = Diff {
+            days: 1, changed: false, status_changed: false, cname_changed: false, network_changed: false,
+            v4_changed: false, v6_changed: false, v4: None, v6: None,
+        };
+        r.prev = Some((l, diff));
+        let (_d, b) = archived(vec![r]).await;
+        assert_eq!(b.num_rows(), 1);
+        assert_eq!(b.schema(), ctprobe::store::archive_dns_schema());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unchanged_repeats_are_dropped() {
+        let (_d, b) = archived(vec![
+            ok("www.a.com", 3, &["1.1.1.1"]),
+            ok("www.a.com", 1, &["1.1.1.1"]),
+            ok("www.a.com", 2, &["1.1.1.1"]),
+        ])
+        .await;
+        assert_eq!(b.num_rows(), 1);
+        let t = b.column_by_name("probed_at").unwrap().as_primitive::<arrow::datatypes::TimestampMillisecondType>();
+        assert_eq!(t.value(0), D + 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_change_adds_a_row() {
+        let (_d, b) = archived(vec![
+            ok("www.a.com", 1, &["1.1.1.1"]),
+            ok("www.a.com", 2, &["2.2.2.2"]),
+            ok("www.a.com", 3, &["2.2.2.2"]),
+        ])
+        .await;
+        assert_eq!(b.num_rows(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn address_order_is_not_a_change() {
+        let (_d, b) = archived(vec![
+            ok("www.a.com", 1, &["1.1.1.1", "2.2.2.2"]),
+            ok("www.a.com", 2, &["2.2.2.2", "1.1.1.1"]),
+        ])
+        .await;
+        assert_eq!(b.num_rows(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn status_change_adds_a_row() {
+        let (_d, b) = archived(vec![
+            ok("www.a.com", 1, &["1.1.1.1"]),
+            probe("www.a.com", Some("a.com"), Kind::Name, 2, 0, Status::NxDomain, &[]),
+        ])
+        .await;
+        assert_eq!(b.num_rows(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn only_name_probes_with_a_domain() {
+        let (_d, b) = archived(vec![
+            ok("www.a.com", 1, &["1.1.1.1"]),
+            probe("www.b.com", Some("b.com"), Kind::Wildcard, 1, 0, Status::Resolved, &["1.1.1.1"]),
+            probe("www.c.com", None, Kind::Name, 1, 0, Status::Resolved, &["1.1.1.1"]),
+        ])
+        .await;
+        assert_eq!(strings(&b, "name"), vec![Some("www.a.com".to_string())]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dns_sorted_with_bloom() {
+        let (d, b) = archived(vec![
+            ok("www.zeta.com", 5, &["1.1.1.1"]),
+            ok("www.alpha.org", 4, &["1.1.1.1"]),
+            ok("www.alpha.org", 2, &["2.2.2.2"]),
+            ok("api.alpha.org", 9, &["1.1.1.1"]),
+            ok("www.beta.io", 1, &["1.1.1.1"]),
+        ])
+        .await;
+        let key: Vec<(String, String, i64)> = strings(&b, "reg_domain")
+            .into_iter()
+            .zip(strings(&b, "name"))
+            .zip(b.column_by_name("probed_at").unwrap().as_primitive::<arrow::datatypes::TimestampMillisecondType>().values().iter())
+            .map(|((r, n), t)| (r.unwrap(), n.unwrap(), *t))
+            .collect();
+        assert!(key.windows(2).all(|w| w[0] <= w[1]), "{key:?}");
+        let p = archive_file(d.path(), "dns", DAY);
+        let r = parquet::file::reader::SerializedFileReader::new(std::fs::File::open(&p).unwrap()).unwrap();
+        use parquet::file::reader::FileReader;
+        let rg = r.metadata().row_group(0);
+        let idx = rg.columns().iter().position(|c| c.column_path().string() == "reg_domain").unwrap();
+        assert!(rg.column(idx).bloom_filter_offset().is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn existing_dns_file_is_done_even_over_budget() {
+        let (d, b) = archived(vec![ok("www.a.com", 1, &["1.1.1.1"])]).await;
+        let f = archive_file(d.path(), "dns", DAY);
+        let o = archive::dns(d.path(), DAY, 1).await.unwrap();
+        assert_eq!(o, Outcome::Written { rows: b.num_rows() as u64, bytes: std::fs::metadata(&f).unwrap().len() });
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn day_without_dns_gets_the_marker() {
+        let d = tempfile::tempdir().unwrap();
+        seed_certs(d.path(), vec![row("1", "a.com", D, "LE", 90, RenewalClass::New)]);
+        assert_eq!(archive::dns(d.path(), DAY, u64::MAX).await.unwrap(), Outcome::Empty);
+        let mut c = cfg(d.path());
+        c.archive_budget_bytes = Some(1 << 30);
+        nightly::run_nightly(&c, day()).await.unwrap();
+        assert!(d.path().join("nightly").join(format!("{DAY}.archive-dns")).exists());
+        assert!(!archive_file(d.path(), "dns", DAY).exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dns_budget_full_sets_no_marker() {
+        let d = tempfile::tempdir().unwrap();
+        seed_certs(d.path(), vec![row("1", "a.com", D, "LE", 90, RenewalClass::New)]);
+        seed_dns(d.path(), vec![ok("www.a.com", 1, &["1.1.1.1"])]);
+        let other = archive_file(d.path(), "certs", "2024-10-03");
+        std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+        std::fs::write(&other, b"existing").unwrap();
+        let mut c = cfg(d.path());
+        c.archive_budget_bytes = Some(1);
+        nightly::run_nightly(&c, day()).await.unwrap();
+        assert!(!d.path().join("nightly").join(format!("{DAY}.archive-dns")).exists());
+        assert!(!archive_file(d.path(), "dns", DAY).exists());
+        let today = NaiveDate::from_ymd_opt(2024, 10, 5).unwrap();
+        assert_eq!(nightly::pending_days(d.path(), today, true), vec![day()]);
+    }
+
+    #[test]
+    fn a_missing_dns_marker_keeps_the_day_pending() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("certs").join(format!("day={DAY}"))).unwrap();
+        std::fs::create_dir_all(d.path().join("nightly")).unwrap();
+        for s in ["domains", "archive"] {
+            std::fs::write(d.path().join("nightly").join(format!("{DAY}.{s}")), b"").unwrap();
+        }
+        let today = NaiveDate::from_ymd_opt(2024, 10, 5).unwrap();
+        assert_eq!(nightly::pending_days(d.path(), today, true), vec![day()]);
+        std::fs::write(d.path().join("nightly").join(format!("{DAY}.archive-dns")), b"").unwrap();
+        assert!(nightly::pending_days(d.path(), today, true).is_empty());
+    }
+}
+
 mod retention {
     use chrono::{Duration, NaiveDate};
     use ctprobe::nightly::expire::{enforce, Retention};

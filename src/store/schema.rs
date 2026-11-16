@@ -202,3 +202,12 @@ schema!(archive_certs_schema, [
     ("entry_index", Int64, false),
     ("primary_domain", Utf8, true),
 ]);
+
+schema!(archive_dns_schema, [
+    ("reg_domain", Utf8, false),
+    ("name", Utf8, false),
+    ("probed_at", ts(), false),
+    ("status", Utf8, false),
+    ("v4", list(), false),
+    ("v6", list(), false),
+]);
