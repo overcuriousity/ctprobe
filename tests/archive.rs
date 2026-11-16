@@ -707,6 +707,23 @@ mod retention {
     }
 
     #[test]
+    fn budget_keeps_unarchived_days_below_the_hard_budget() {
+        let d = tempfile::tempdir().unwrap();
+        for ago in [3, 4] {
+            put(d.path(), "certs", ago, 1000);
+            mark(d.path(), ago, "domains");
+        }
+        // 2000 bytes: above the 90% target of 2100, below the hard budget.
+        let r = ret(2100, None, None, true);
+        assert_eq!(enforce(d.path(), &r, today()).unwrap(), None);
+        assert!(has(d.path(), "certs", 3) && has(d.path(), "certs", 4));
+        // Without an archive every finished day counts as archived, as before.
+        let r = ret(2100, None, None, false);
+        assert_eq!(enforce(d.path(), &r, today()).unwrap(), None);
+        assert!(!has(d.path(), "certs", 4) && has(d.path(), "certs", 3));
+    }
+
+    #[test]
     fn archive_dir_untouched() {
         let d = tempfile::tempdir().unwrap();
         let before = archive(d.path());

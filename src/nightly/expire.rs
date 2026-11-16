@@ -120,12 +120,13 @@ pub fn enforce(data: &Path, r: &Retention, today: NaiveDate) -> Result<Option<St
             return Ok(None);
         }
     }
+    // Days the archive does not hold yet go only to stay under the hard budget.
     for d in unarchived {
+        if size <= budget {
+            break;
+        }
         tracing::error!("disk budget forces removing {d} before it is archived");
         size = size.saturating_sub(remove_day(data, d)?);
-        if size <= target {
-            return Ok(None);
-        }
     }
     for d in pending {
         if size <= budget {
