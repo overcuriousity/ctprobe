@@ -1,11 +1,15 @@
+use chrono::NaiveDate;
 use ctprobe::config::Config;
 use ctprobe::fetch::FetchOpts;
 use ctprobe::mocklog::{MockLog, MockOpts};
 use ctprobe::pipeline::{Pipeline, PipelineOpts};
 use ctprobe::query::QueryEngine;
 use ctprobe::registry::{LogKind, LogSpec};
-use ctprobe::web;
+use ctprobe::store::Writer;
+use ctprobe::types::{CertRow, ParsedCert, RenewalClass};
+use ctprobe::{names, nightly, web};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,9 +21,30 @@ struct App {
     _dir: tempfile::TempDir,
 }
 
+/// Certificates written before the app starts, days to archive first, and
+/// the query time limit.
+#[derive(Default)]
+struct Setup {
+    certs: Vec<CertRow>,
+    archive: Vec<i64>,
+    timeout: Option<Duration>,
+}
+
 async fn app() -> App {
+    app_with(Setup::default()).await
+}
+
+async fn app_with(setup: Setup) -> App {
     let log = MockLog::start(MockOpts::rfc6962(0)).await;
     let dir = tempfile::tempdir().unwrap();
+    if !setup.certs.is_empty() {
+        let mut w = Writer::open(dir.path(), 0).unwrap();
+        for r in setup.certs {
+            w.push_cert(r);
+        }
+        w.flush(1).unwrap();
+        w.publish(1).unwrap();
+    }
     let cfg = Config {
         bind: "127.0.0.1:0".parse().unwrap(),
         data_dir: dir.path().to_path_buf(),
@@ -36,6 +61,12 @@ async fn app() -> App {
         dns_days: None,
         archive_budget_bytes: None,
     };
+    for ms in setup.archive {
+        let mut c = cfg.clone();
+        c.archive_budget_bytes = Some(1 << 40);
+        let day = chrono::DateTime::from_timestamp_millis(ms).unwrap().date_naive();
+        nightly::run_nightly(&c, day).await.unwrap();
+    }
     let opts = PipelineOpts {
         logs: Some(vec![LogSpec {
             name: "mock".into(),
@@ -62,7 +93,11 @@ async fn app() -> App {
         dns: ctprobe::dns::DnsOpts { minute: Duration::from_millis(100), ..Default::default() },
     };
     let pipe = Pipeline::start(cfg, opts).await.unwrap();
-    let engine = Arc::new(QueryEngine::open(dir.path()).unwrap());
+    let mut engine = QueryEngine::open(dir.path()).unwrap();
+    if let Some(t) = setup.timeout {
+        engine.set_timeout(t);
+    }
+    let engine = Arc::new(engine);
     let state = web::AppState::new(engine, pipe.handle.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -161,4 +196,312 @@ async fn wrong_method_and_bare_prefix_are_json_404() {
     let (s, _, b) = get(&a, "/api/v1").await;
     assert_eq!(s, 404);
     assert_eq!(code(&b), "not_found");
+}
+
+const DAY_MS: i64 = 86_400_000;
+const D: i64 = 20_000 * DAY_MS; // 2024-10-04
+
+fn day_dir(a: &App, ms: i64) -> std::path::PathBuf {
+    let day = chrono::DateTime::from_timestamp_millis(ms).unwrap().date_naive();
+    assert!(day < NaiveDate::from_ymd_opt(2026, 1, 1).unwrap());
+    a._dir.path().join("certs").join(format!("day={}", day.format("%Y-%m-%d")))
+}
+
+/// A certificate; registered domains and the primary come from its names.
+fn cert(index: u64, names: &[&str], seen: i64) -> CertRow {
+    let mut regs: Vec<String> = names.iter().filter_map(|n| names::registered_domain(n)).collect();
+    regs.sort();
+    regs.dedup();
+    CertRow {
+        parsed: ParsedCert {
+            issuer_cn: "LE".into(),
+            issuer_org: "Org".into(),
+            issuer_der: vec![],
+            serial_hex: format!("{index:x}"),
+            subject_cn: Some(names[0].into()),
+            names: names.iter().map(|s| s.to_string()).collect(),
+            san_count: names.len() as u32,
+            key_type: "ecdsa".into(),
+            key_bits: 256,
+            sig_type: "ecdsa-sha256".into(),
+            not_before_ms: seen,
+            not_after_ms: seen + 90 * DAY_MS,
+        },
+        primary_domain: names::registered_domain(names[0]),
+        reg_domains: regs,
+        is_wildcard: names.iter().any(|n| n.starts_with("*.")),
+        is_precert: false,
+        renewal: RenewalClass::New,
+        days_since_seen: None,
+        new_names: 1,
+        new_domains: 1,
+        log: 0,
+        index,
+        der_size: 100,
+        seen_at_ms: seen,
+        sct_lag_ms: 1,
+        not_before_lag_ms: 1,
+        cert_hash: index,
+    }
+}
+
+async fn page(a: &App, path: &str) -> Value {
+    let (s, _, b) = get(a, path).await;
+    assert_eq!(s, 200, "{path}: {b}");
+    b
+}
+
+async fn rows(a: &App, path: &str) -> Vec<Value> {
+    page(a, path).await["rows"].as_array().unwrap().clone()
+}
+
+type Key = (i64, i64, String);
+
+fn key(r: &Value) -> Key {
+    (r["log_id"].as_i64().unwrap(), r["entry_index"].as_i64().unwrap(), r["reg_domain"].as_str().unwrap().to_string())
+}
+
+fn indexes(rs: &[Value]) -> Vec<i64> {
+    let mut v: Vec<i64> = rs.iter().map(|r| r["entry_index"].as_i64().unwrap()).collect();
+    v.sort();
+    v
+}
+
+/// The row without the parts that depend on the hot tier.
+fn without_tier(r: &Value) -> Value {
+    let mut r = r.clone();
+    let o = r.as_object_mut().unwrap();
+    o.remove("tier");
+    o.remove("detail");
+    r
+}
+
+fn two_domain_cert() -> CertRow {
+    cert(1, &["a.one.com", "*.one.com", "b.two.org"], D + 1000)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn matches_a_non_primary_domain() {
+    for archive in [vec![], vec![D]] {
+        let a = app_with(Setup { certs: vec![two_domain_cert()], archive: archive.clone(), ..Default::default() }).await;
+        let rs = rows(&a, "/api/v1/certs?domain=two.org").await;
+        assert_eq!(rs.len(), 1, "archive {archive:?}: {rs:?}");
+        assert_eq!(rs[0]["reg_domain"], "two.org");
+        assert_eq!(rs[0]["names"], serde_json::json!(["b.two.org"]));
+        let legacy = page(&a, "/api/certs?domain=two.org").await;
+        assert_eq!(legacy["rows"].as_array().unwrap().len(), 0, "{legacy}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tier_marks_follow_the_hot_dir() {
+    let a = app_with(Setup { certs: vec![two_domain_cert()], archive: vec![D], ..Default::default() }).await;
+    let hot = rows(&a, "/api/v1/certs?domain=one.com").await;
+    assert_eq!(hot.len(), 1, "{hot:?}");
+    assert_eq!(hot[0]["tier"], "hot");
+    assert_eq!(hot[0]["names"], serde_json::json!(["*.one.com", "a.one.com"]));
+    for k in ["key_type", "renewal", "san_count"] {
+        assert!(hot[0]["detail"].get(k).is_some(), "{k}: {}", hot[0]);
+    }
+    assert_eq!(hot[0]["detail"]["san_count"], 3);
+    std::fs::remove_dir_all(day_dir(&a, D)).unwrap();
+    let cold = rows(&a, "/api/v1/certs?domain=one.com").await;
+    assert_eq!(cold.len(), 1, "{cold:?}");
+    assert_eq!(cold[0]["tier"], "archive");
+    assert!(cold[0].get("detail").is_none(), "{}", cold[0]);
+    assert_eq!(without_tier(&cold[0]), without_tier(&hot[0]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn archive_file_of_any_name_is_read() {
+    let a = app_with(Setup { certs: vec![two_domain_cert()], archive: vec![D], ..Default::default() }).await;
+    let dir = a._dir.path().join("archive").join("certs");
+    std::fs::rename(dir.join("2024-10-04.parquet"), dir.join("merged.parquet")).unwrap();
+    std::fs::remove_dir_all(day_dir(&a, D)).unwrap();
+    let rs = rows(&a, "/api/v1/certs?domain=two.org").await;
+    assert_eq!(rs.len(), 1, "{rs:?}");
+    assert_eq!(rs[0]["tier"], "archive");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unarchived_day_is_scanned() {
+    let archived = app_with(Setup { certs: vec![two_domain_cert()], archive: vec![D], ..Default::default() }).await;
+    let scanned = app_with(Setup { certs: vec![two_domain_cert()], ..Default::default() }).await;
+    for d in ["one.com", "two.org"] {
+        let path = format!("/api/v1/certs?domain={d}");
+        let s = rows(&scanned, &path).await;
+        assert_eq!(s.len(), 1, "{s:?}");
+        assert_eq!(s[0]["tier"], "hot");
+        assert_eq!(s, rows(&archived, &path).await, "{d}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deeper_name_filters_rows() {
+    let certs = vec![
+        cert(1, &["a.one.com"], D + 1),
+        cert(2, &["*.one.com"], D + 2),
+        cert(3, &["b.one.com"], D + 3),
+        cert(4, &["x.a.one.com", "one.com"], D + 4),
+    ];
+    for archive in [vec![], vec![D]] {
+        let a = app_with(Setup { certs: certs.clone(), archive, ..Default::default() }).await;
+        assert_eq!(indexes(&rows(&a, "/api/v1/certs?domain=a.one.com").await), vec![1, 2]);
+        assert_eq!(indexes(&rows(&a, "/api/v1/certs?domain=*.a.one.com").await), vec![1, 2]);
+        assert_eq!(indexes(&rows(&a, "/api/v1/certs?domain=one.com").await), vec![1, 2, 3, 4]);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn filters_apply_in_both_tiers() {
+    let mut c1 = cert(1, &["one.com", "www.one.com"], D + 1000);
+    c1.parsed.not_after_ms = D + 90 * DAY_MS;
+    let mut c2 = cert(2, &["*.one.com"], D + 2000);
+    c2.parsed.issuer_cn = "Sectigo RSA".into();
+    c2.parsed.not_after_ms = D + 30 * DAY_MS;
+    let mut c3 = cert(3, &["a.one.com"], D + DAY_MS + 3000);
+    c3.parsed.issuer_cn = "R3 Encrypt".into();
+    c3.parsed.not_after_ms = D + 365 * DAY_MS;
+    let a = app_with(Setup { certs: vec![c1, c2, c3], archive: vec![D, D + DAY_MS], ..Default::default() }).await;
+    let cases: Vec<(String, Vec<i64>)> = vec![
+        (format!("from={}", D + 1500), vec![2, 3]),
+        (format!("to={}", D + 1500), vec![1]),
+        ("from=2024-10-05".into(), vec![3]),
+        ("to=2024-10-04".into(), vec![1, 2]),
+        (format!("expires_from={}", D + 60 * DAY_MS), vec![1, 3]),
+        (format!("expires_to={}", D + 60 * DAY_MS), vec![2]),
+        ("issuer=LE".into(), vec![1]),
+        ("issuer_contains=encrypt".into(), vec![3]),
+        ("issuer_contains=SECTIGO".into(), vec![2]),
+        ("tld=com".into(), vec![1, 2, 3]),
+        ("tld=org".into(), vec![]),
+        ("wildcard=true".into(), vec![2]),
+        ("wildcard=false".into(), vec![1, 3]),
+    ];
+    let mut before = Vec::new();
+    for (q, want) in &cases {
+        let rs = rows(&a, &format!("/api/v1/certs?domain=one.com&{q}")).await;
+        assert_eq!(&indexes(&rs), want, "{q}");
+        assert!(rs.iter().all(|r| r["tier"] == "hot"), "{q}: {rs:?}");
+        before.push(rs.iter().map(without_tier).collect::<Vec<_>>());
+    }
+    std::fs::remove_dir_all(day_dir(&a, D)).unwrap();
+    std::fs::remove_dir_all(day_dir(&a, D + DAY_MS)).unwrap();
+    for ((q, _), b) in cases.iter().zip(before) {
+        let rs = rows(&a, &format!("/api/v1/certs?domain=one.com&{q}")).await;
+        assert!(rs.iter().all(|r| r["tier"] == "archive"), "{q}: {rs:?}");
+        assert_eq!(rs.iter().map(without_tier).collect::<Vec<_>>(), b, "{q}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tld_and_wildcard_are_per_row() {
+    for archive in [vec![], vec![D]] {
+        let a = app_with(Setup { certs: vec![two_domain_cert()], archive, ..Default::default() }).await;
+        let n = |q: &'static str| {
+            let a = &a;
+            async move { rows(a, &format!("/api/v1/certs?domain=two.org&{q}")).await.len() }
+        };
+        assert_eq!(n("tld=org").await, 1);
+        assert_eq!(n("tld=com").await, 0);
+        assert_eq!(n("wildcard=true").await, 0);
+        assert_eq!(n("wildcard=false").await, 1);
+        assert_eq!(rows(&a, "/api/v1/certs?domain=one.com&wildcard=true").await.len(), 1);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn paging_returns_every_row_once() {
+    // Day D is archived and still hot, day D+1 is only hot. Within a day all
+    // certificates share a time; one of them covers both domains.
+    let s1 = D + 5;
+    let s2 = D + DAY_MS + 5;
+    let mut late = cert(6, &["c.one.com"], s2);
+    late.log = 1;
+    let certs = vec![
+        cert(1, &["a.one.com"], s1),
+        cert(2, &["a.bone.com"], s1),
+        cert(3, &["b.one.com", "b.bone.com"], s1),
+        cert(4, &["d.one.com"], s2),
+        cert(5, &["e.bone.com"], s2),
+        late,
+    ];
+    let a = app_with(Setup { certs, archive: vec![D], ..Default::default() }).await;
+    let mut seen: Vec<Key> = Vec::new();
+    let mut all = Vec::new();
+    let mut path = "/api/v1/certs?q=one.com&mode=contains&limit=3".to_string();
+    let mut pages = 0;
+    loop {
+        let p = page(&a, &path).await;
+        pages += 1;
+        let rs = p["rows"].as_array().unwrap();
+        seen.extend(rs.iter().map(key));
+        all.extend(rs.iter().cloned());
+        match p["next_cursor"].as_str() {
+            Some(c) => path = format!("/api/v1/certs?q=one.com&mode=contains&limit=3&cursor={c}"),
+            None => break,
+        }
+        assert!(pages < 10, "no end");
+    }
+    assert_eq!(pages, 3, "{all:?}");
+    assert_eq!(seen.len(), 7, "{seen:?}");
+    assert_eq!(seen.iter().collect::<HashSet<_>>().len(), 7, "{seen:?}");
+    let order: Vec<(i64, i64, i64)> =
+        all.iter().map(|r| (r["seen_at"].as_i64().unwrap(), r["log_id"].as_i64().unwrap(), r["entry_index"].as_i64().unwrap())).collect();
+    let mut sorted = order.clone();
+    sorted.sort_by(|x, y| y.cmp(x));
+    assert_eq!(order, sorted);
+    // The certificate covering both domains: bone.com before one.com.
+    let three: Vec<&str> = all.iter().filter(|r| r["entry_index"] == 3).map(|r| r["reg_domain"].as_str().unwrap()).collect();
+    assert_eq!(three, vec!["bone.com", "one.com"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fuzzy_scope_looks_up_hits() {
+    let a = app_with(Setup { certs: vec![cert(1, &["www.example.com"], D)], ..Default::default() }).await;
+    let rs = rows(&a, "/api/v1/certs?q=exampel.com&mode=levenshtein").await;
+    assert_eq!(rs.len(), 1, "{rs:?}");
+    assert_eq!(rs[0]["reg_domain"], "example.com");
+    assert!(rows(&a, "/api/v1/certs?q=nothing-like-it.net").await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scope_errors() {
+    let a = app().await;
+    let long = format!("/api/v1/certs?q={}", "a".repeat(254));
+    for p in [
+        "/api/v1/certs",
+        "/api/v1/certs?domain=a.com&q=a.com",
+        "/api/v1/certs?domain=a.com&cursor=garbage",
+        "/api/v1/certs?domain=1.2.3.4",
+        "/api/v1/certs?domain=a.com&from=yesterday",
+        "/api/v1/certs?domain=a.com&limit=0",
+        "/api/v1/certs?domain=a.com&wildcard=maybe",
+        "/api/v1/certs?domain=a.com&mode=contains",
+        "/api/v1/certs?q=a.com&mode=x",
+        "/api/v1/certs?q=%20",
+        long.as_str(),
+    ] {
+        let (s, _, b) = get(&a, p).await;
+        assert_eq!(s, 400, "{p}: {b}");
+        assert_eq!(code(&b), "bad_request", "{p}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn timeout_without_rows_is_504() {
+    let a = app_with(Setup { certs: vec![two_domain_cert()], timeout: Some(Duration::ZERO), ..Default::default() }).await;
+    let (s, _, b) = get(&a, "/api/v1/certs?domain=one.com").await;
+    assert_eq!(s, 504, "{b}");
+    assert_eq!(code(&b), "timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn certs_takes_the_archive_permit_when_there_is_an_archive() {
+    let a = app_with(Setup { certs: vec![two_domain_cert()], archive: vec![D], ..Default::default() }).await;
+    let _held = a.state.v1.enter(true).unwrap();
+    let (s, _, b) = get(&a, "/api/v1/certs?domain=one.com").await;
+    assert_eq!(s, 429, "{b}");
+    let (s, _, _) = get(&a, "/api/v1/search?q=one.com").await;
+    assert_eq!(s, 200);
 }

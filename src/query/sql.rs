@@ -16,9 +16,9 @@ use sqlparser::parser::Parser;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-const MS_PER_DAY: i64 = 86_400_000;
-const MEMORY: usize = 1 << 30;
-const PARTITIONS: usize = 2;
+pub(super) const MS_PER_DAY: i64 = 86_400_000;
+pub(super) const MEMORY: usize = 1 << 30;
+pub(super) const PARTITIONS: usize = 2;
 const CERT_COLUMNS: &str = "seen_at, cn, primary_domain, issuer_cn, issuer_org, not_before, \
     not_after, san_count, names, key_type, key_bits, sig_type, is_precert, renewal, \
     days_since_seen, log_id, entry_index, serial, der_size, tld, is_wildcard";
@@ -211,7 +211,7 @@ pub fn check_sql(q: &str) -> Result<(), QueryError> {
     }
 }
 
-fn to_result(batches: &[RecordBatch], schema: SchemaRef, limit: usize) -> Result<QueryResult> {
+pub(super) fn to_result(batches: &[RecordBatch], schema: SchemaRef, limit: usize) -> Result<QueryResult> {
     let columns: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
     let mut w = arrow::json::ArrayWriter::new(Vec::new());
     for b in batches {
@@ -233,7 +233,7 @@ fn to_result(batches: &[RecordBatch], schema: SchemaRef, limit: usize) -> Result
 }
 
 /// Files of a day-partitioned table inside an optional time range.
-fn in_range(data: &Path, table: &str, from: Option<i64>, to: Option<i64>) -> Vec<PathBuf> {
+pub(super) fn in_range(data: &Path, table: &str, from: Option<i64>, to: Option<i64>) -> Vec<PathBuf> {
     let lo = from.map(day_string);
     let hi = to.map(day_string);
     list_parts(data, table)
@@ -250,7 +250,7 @@ fn in_range(data: &Path, table: &str, from: Option<i64>, to: Option<i64>) -> Vec
 }
 
 /// Days holding `table` files within the range, newest first, as days since the epoch.
-fn days_of(data: &Path, table: &str, from: Option<i64>, to: Option<i64>) -> Vec<i64> {
+pub(super) fn days_of(data: &Path, table: &str, from: Option<i64>, to: Option<i64>) -> Vec<i64> {
     let mut days: Vec<i64> = in_range(data, table, from, to)
         .iter()
         .filter_map(|p| {
@@ -329,7 +329,7 @@ impl QueryEngine {
         self.run_for(sql, limit, from, to, self.timeout).await
     }
 
-    async fn run_for(
+    pub(super) async fn run_for(
         &self,
         sql: String,
         limit: usize,

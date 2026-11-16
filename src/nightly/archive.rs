@@ -83,6 +83,15 @@ impl Builders {
     }
 }
 
+/// The names of a certificate that belong to one of its registered domains,
+/// sorted ascending.
+pub(crate) fn names_of<'a>(names: &[&'a str], reg: &str) -> Vec<&'a str> {
+    let mut mine: Vec<&str> =
+        names.iter().copied().filter(|n| registered_domain(n).as_deref() == Some(reg)).collect();
+    mine.sort_unstable();
+    mine
+}
+
 /// Pass 1: one unsorted row per (cert, registered domain).
 fn expand(files: &[std::path::PathBuf], out: &Path) -> Result<u64> {
     let schema = archive_certs_schema();
@@ -110,11 +119,8 @@ fn expand(files: &[std::path::PathBuf], out: &Path) -> Result<u64> {
                 let all: Vec<&str> = all.as_string::<i32>().iter().flatten().collect();
                 let r = regs.value(i);
                 for reg in r.as_string::<i32>().iter().flatten() {
-                    let mut mine: Vec<&str> =
-                        all.iter().copied().filter(|n| registered_domain(n).as_deref() == Some(reg)).collect();
-                    mine.sort_unstable();
                     b.reg.append_value(reg);
-                    for n in mine {
+                    for n in names_of(&all, reg) {
                         b.names.values().append_value(n);
                     }
                     b.names.append(true);

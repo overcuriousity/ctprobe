@@ -10,6 +10,8 @@ use chrono::NaiveDate;
 use serde::de::DeserializeOwned;
 
 const DEFAULT_LIMIT: usize = 100;
+/// Longest search term, in bytes (the longest DNS name).
+const MAX_Q: usize = 253;
 const MAX_LIMIT: usize = 1000;
 
 /// `Query<T>` whose rejection is an [`ApiError`].
@@ -27,13 +29,21 @@ impl<S: Send + Sync, T: DeserializeOwned> FromRequestParts<S> for Params<T> {
 }
 
 /// A domain name and its registered domain, both normalised. A leading `*.` is dropped.
-#[allow(dead_code)] // used by the certs endpoint
 pub fn domain(raw: &str) -> Result<(String, String), ApiError> {
     let bad = || ApiError::BadRequest(format!("not a valid domain name: {raw:?}"));
     let name = names::normalize(raw).ok_or_else(bad)?;
     let name = name.strip_prefix("*.").unwrap_or(&name).to_string();
     let reg = names::registered_domain(&name).ok_or_else(bad)?;
     Ok((name, reg))
+}
+
+/// A search term: trimmed, not empty, at most `MAX_Q` bytes.
+pub fn q(v: Option<&str>) -> Result<&str, ApiError> {
+    let q = v.map(str::trim).unwrap_or_default();
+    if q.is_empty() || q.len() > MAX_Q {
+        return Err(ApiError::BadRequest(format!("q must be 1 to {MAX_Q} bytes")));
+    }
+    Ok(q)
 }
 
 pub fn limit(v: Option<usize>) -> Result<usize, ApiError> {
@@ -46,7 +56,6 @@ pub fn limit(v: Option<usize>) -> Result<usize, ApiError> {
 
 /// Milliseconds since the epoch, or a date (`YYYY-MM-DD`, UTC) meaning its
 /// first millisecond, or with `end` its last. Empty counts as absent.
-#[allow(dead_code)] // used by the certs endpoint
 pub fn when(v: Option<&str>, end: bool, name: &str) -> Result<Option<i64>, ApiError> {
     let s = match v {
         None | Some("") => return Ok(None),

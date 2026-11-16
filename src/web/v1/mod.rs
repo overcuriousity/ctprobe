@@ -1,5 +1,6 @@
 //! `/api/v1`: a stable JSON API with a uniform error body and load limits.
 
+mod certs;
 pub mod error;
 pub mod input;
 
@@ -15,8 +16,6 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-/// Longest search term, in bytes (the longest DNS name).
-const MAX_Q: usize = 253;
 /// Requests allowed in flight across all of v1.
 const ALL_PERMITS: usize = 2;
 /// Of those, requests that read the archive.
@@ -60,6 +59,7 @@ impl Default for Gate {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/search", get(search))
+        .route("/certs", get(certs::certs))
         .method_not_allowed_fallback(not_found)
         .fallback(not_found)
 }
@@ -78,10 +78,7 @@ struct SearchParams {
 }
 
 async fn search(State(s): State<AppState>, Params(p): Params<SearchParams>) -> Result<Json<Value>, ApiError> {
-    let q = p.q.as_deref().map(str::trim).unwrap_or_default();
-    if q.is_empty() || q.len() > MAX_Q {
-        return Err(ApiError::BadRequest(format!("q must be 1 to {MAX_Q} bytes")));
-    }
+    let q = input::q(p.q.as_deref())?;
     let mode = input::mode(p.mode.as_deref(), p.distance)?;
     let limit = input::limit(p.limit)?;
     // Search reads the permanent index, not the archive.
