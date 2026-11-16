@@ -370,3 +370,9 @@ pub fn dir_size(dir: &Path) -> u64 {
     }
     total
 }
+
+/// Bytes under the data directory that the disk budget governs: everything but
+/// the archive.
+pub fn hot_size(data: &Path) -> u64 {
+    dir_size(data).saturating_sub(dir_size(&data.join("archive")))
+}

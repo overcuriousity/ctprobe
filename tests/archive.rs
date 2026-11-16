@@ -237,3 +237,189 @@ async fn enabled_run_writes_file_and_marker() {
     assert!(archive_file(d.path(), "certs", DAY).exists());
     assert!(d.path().join("nightly").join(format!("{DAY}.archive")).exists());
 }
+
+mod retention {
+    use chrono::{Duration, NaiveDate};
+    use ctprobe::nightly::expire::{enforce, Retention};
+    use std::path::Path;
+
+    const BIG: u64 = 1 << 40;
+
+    fn today() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 1, 25).unwrap()
+    }
+
+    fn name(ago: i64) -> String {
+        (today() - Duration::days(ago)).format("%Y-%m-%d").to_string()
+    }
+
+    fn put(dir: &Path, table: &str, ago: i64, n: usize) {
+        let p = dir.join(table).join(format!("day={}", name(ago)));
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join("daily.parquet"), vec![0u8; n]).unwrap();
+    }
+
+    fn mark(dir: &Path, ago: i64, step: &str) {
+        let p = dir.join("nightly");
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join(format!("{}.{step}", name(ago))), b"").unwrap();
+    }
+
+    fn has(dir: &Path, table: &str, ago: i64) -> bool {
+        dir.join(table).join(format!("day={}", name(ago))).exists()
+    }
+
+    fn ret(budget: u64, hot: Option<u32>, dns: Option<u32>, archive: bool) -> Retention {
+        Retention { budget, hot_days: hot, dns_days: dns, archive }
+    }
+
+    /// A fixed archive that no rule may touch; returns its file list.
+    fn archive(dir: &Path) -> Vec<String> {
+        let p = dir.join("archive/certs");
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join("a.parquet"), vec![0u8; 5000]).unwrap();
+        listing(dir)
+    }
+
+    fn listing(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir.join("archive/certs"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn no_keys_behaves_as_before() {
+        let d = tempfile::tempdir().unwrap();
+        for ago in [1, 2, 3, 4] {
+            put(d.path(), "certs", ago, 1000);
+            put(d.path(), "dns", ago, 10);
+        }
+        let r = ret(BIG, None, None, false);
+        assert_eq!(enforce(d.path(), &r, today()).unwrap(), None);
+        for ago in [1, 2, 3, 4] {
+            assert!(has(d.path(), "certs", ago) && has(d.path(), "dns", ago));
+        }
+        // Over budget: the oldest finished day goes, certs and dns together.
+        for ago in [2, 3, 4] {
+            mark(d.path(), ago, "domains");
+        }
+        assert_eq!(enforce(d.path(), &ret(4100, None, None, false), today()).unwrap(), None);
+        assert!(!has(d.path(), "certs", 4) && !has(d.path(), "dns", 4));
+        assert!(has(d.path(), "certs", 3));
+    }
+
+    #[test]
+    fn age_removes_old_certs_days() {
+        let d = tempfile::tempdir().unwrap();
+        for ago in [1, 2, 3, 4] {
+            put(d.path(), "certs", ago, 10);
+            put(d.path(), "dns", ago, 10);
+        }
+        put(d.path(), "certs", 0, 10);
+        let r = ret(BIG, Some(2), None, false);
+        assert_eq!(enforce(d.path(), &r, today()).unwrap(), None);
+        for ago in [0, 1, 2] {
+            assert!(has(d.path(), "certs", ago), "certs {ago}");
+        }
+        for ago in [3, 4] {
+            assert!(!has(d.path(), "certs", ago), "certs {ago}");
+        }
+        for ago in [1, 2, 3, 4] {
+            assert!(has(d.path(), "dns", ago), "dns {ago}");
+        }
+    }
+
+    #[test]
+    fn age_waits_for_the_archive() {
+        let d = tempfile::tempdir().unwrap();
+        for ago in [3, 4] {
+            put(d.path(), "certs", ago, 10);
+        }
+        mark(d.path(), 4, "archive");
+        let r = ret(BIG, Some(2), None, true);
+        assert_eq!(enforce(d.path(), &r, today()).unwrap(), None);
+        assert!(!has(d.path(), "certs", 4));
+        assert!(has(d.path(), "certs", 3), "not archived yet");
+    }
+
+    #[test]
+    fn dns_age_waits_for_its_own_marker() {
+        let d = tempfile::tempdir().unwrap();
+        for ago in [3, 4] {
+            put(d.path(), "dns", ago, 10);
+            mark(d.path(), ago, "archive");
+        }
+        let r = ret(BIG, None, Some(2), true);
+        assert_eq!(enforce(d.path(), &r, today()).unwrap(), None);
+        assert!(has(d.path(), "dns", 3) && has(d.path(), "dns", 4));
+        mark(d.path(), 4, "archive-dns");
+        enforce(d.path(), &r, today()).unwrap();
+        assert!(!has(d.path(), "dns", 4));
+        assert!(has(d.path(), "dns", 3));
+    }
+
+    #[test]
+    fn budget_ignores_archive_bytes() {
+        let d = tempfile::tempdir().unwrap();
+        let before = archive(d.path());
+        put(d.path(), "certs", 3, 1000);
+        mark(d.path(), 3, "domains");
+        let r = ret(2000, None, None, true);
+        assert_eq!(enforce(d.path(), &r, today()).unwrap(), None);
+        assert!(has(d.path(), "certs", 3));
+        assert_eq!(listing(d.path()), before);
+        assert_eq!(ctprobe::metrics::hot_size(d.path()), 1000);
+    }
+
+    #[test]
+    fn budget_takes_archived_days_first() {
+        let d = tempfile::tempdir().unwrap();
+        let before = archive(d.path());
+        for ago in [2, 3, 4] {
+            put(d.path(), "certs", ago, 1000);
+            mark(d.path(), ago, "domains");
+        }
+        mark(d.path(), 3, "archive");
+        let r = ret(2300, None, None, true);
+        assert_eq!(enforce(d.path(), &r, today()).unwrap(), None);
+        assert!(!has(d.path(), "certs", 3), "archived day first");
+        assert!(has(d.path(), "certs", 4) && has(d.path(), "certs", 2));
+        assert_eq!(listing(d.path()), before);
+    }
+
+    #[test]
+    fn budget_last_resort_logs_and_removes() {
+        let d = tempfile::tempdir().unwrap();
+        let before = archive(d.path());
+        for ago in [3, 4] {
+            put(d.path(), "certs", ago, 1000);
+            mark(d.path(), ago, "domains");
+        }
+        let r = ret(1500, None, None, true);
+        assert_eq!(enforce(d.path(), &r, today()).unwrap(), None);
+        assert!(!has(d.path(), "certs", 4));
+        assert!(has(d.path(), "certs", 3));
+        assert_eq!(listing(d.path()), before);
+    }
+
+    #[test]
+    fn archive_dir_untouched() {
+        let d = tempfile::tempdir().unwrap();
+        let before = archive(d.path());
+        for ago in [0, 1, 5, 9] {
+            put(d.path(), "certs", ago, 1000);
+            put(d.path(), "dns", ago, 1000);
+            mark(d.path(), ago, "domains");
+            mark(d.path(), ago, "archive");
+            mark(d.path(), ago, "archive-dns");
+        }
+        let r = ret(10, Some(1), Some(1), true);
+        assert!(enforce(d.path(), &r, today()).unwrap().is_some());
+        assert!(has(d.path(), "certs", 0), "today is never deleted");
+        assert_eq!(listing(d.path()), before);
+        assert!(d.path().join("archive/certs/a.parquet").exists());
+    }
+}

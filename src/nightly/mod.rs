@@ -39,7 +39,7 @@ pub async fn run_nightly(cfg: &Config, day: NaiveDate) -> Result<()> {
         mark(data, &d, "rollups")?;
     }
     if !step_done(data, &d, "compact") {
-        compact::run(data, &d, cfg.disk_budget_bytes).await?;
+        compact::run(data, &d, &cfg.retention()).await?;
         mark(data, &d, "compact")?;
     }
     if !step_done(data, &d, "domains") {
@@ -66,7 +66,7 @@ pub async fn run_nightly(cfg: &Config, day: NaiveDate) -> Result<()> {
         }
     }
     cleanup(data)?;
-    expire::enforce(data, cfg.disk_budget_bytes, Utc::now().date_naive())?;
+    expire::enforce(data, &cfg.retention(), Utc::now().date_naive())?;
     Ok(())
 }
 

@@ -68,10 +68,10 @@ async fn compact_table(
     Ok(())
 }
 
-pub async fn run(data: &Path, day: &str, budget: u64) -> Result<()> {
+pub async fn run(data: &Path, day: &str, r: &expire::Retention) -> Result<()> {
     let need = ["certs", "dns"].iter().map(|t| dir_size(&data.join(t).join(format!("day={day}")))).max().unwrap_or(0);
     if free_bytes(data).is_some_and(|f| f < need) {
-        expire::enforce(data, budget, Utc::now().date_naive())?;
+        expire::enforce(data, r, Utc::now().date_naive())?;
     }
     compact_table(data, "certs", certs_schema(), day, "ORDER BY primary_domain NULLS LAST, seen_at", &[("primary_domain", BLOOM_NDV)]).await?;
     compact_table(data, "sightings", sightings_schema(), day, "", &[]).await?;
