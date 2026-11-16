@@ -98,9 +98,10 @@ Errors have one shape, `{"error": {"code": "...", "message": "..."}}`, with code
 A request that finds no free slot is refused at once with 429 and `Retry-After: 1`; it never queues.
 Two requests run at once, and only one of them may read the archive.
 
-`limit` is 1 to 1000, default 100, and a value outside that is a 400. A page with more rows after it carries
-`next_cursor`; pass it back as `cursor`. When the time limit ends a walk that has rows, they come back with
-`cut_short: true` and a `next_cursor` to continue from. With none, the answer is 504.
+`limit` is 1 to 1000, default 100, and a value outside that is a 400. Follow `next_cursor` until it is null.
+`cut_short: true` means the time limit ended the walk: `next_cursor` is then always set and continues it. A walk
+that found no rows is a 504, except for `/domain` with a summary, which answers 200 with empty `rows`,
+`cut_short: true` and a cursor to retry from.
 
 Each row has a `tier`: `hot` while its day is still in the hot tier, `archive` once only the archive holds it.
 Certificate rows from `hot` also carry `detail`. DNS rows are the archive's reduction: each name's first answer

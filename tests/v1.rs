@@ -685,6 +685,19 @@ async fn dns_paging_returns_every_row_once() {
     sorted.sort_by(|x, y| y.0.cmp(&x.0).then(x.1.cmp(&y.1)));
     assert_eq!(order, sorted);
     assert_eq!(all[0]["tier"], "hot");
+    // The page boundary at the very end: no cursor after the last row.
+    let p = page(&a, "/api/v1/domain/example.com?limit=6").await;
+    assert_eq!(dns_rows(&p).len(), 6);
+    assert!(p["dns"]["next_cursor"].is_null() && p["dns"]["cut_short"] == false, "{p}");
+    let p = page(&a, "/api/v1/domain/example.com?limit=5").await;
+    let c = p["dns"]["next_cursor"].as_str().unwrap().to_string();
+    let p = page(&a, &format!("/api/v1/domain/example.com?limit=5&cursor={c}")).await;
+    assert_eq!(dns_rows(&p), all[5..].to_vec());
+    assert!(p["dns"]["next_cursor"].is_null(), "{p}");
+    // The start cursor reads like none.
+    let start = ctprobe::query::DnsCursor::start().encode();
+    let p = page(&a, &format!("/api/v1/domain/example.com?limit=100&cursor={start}")).await;
+    assert_eq!(dns_rows(&p), all);
     for limit in [1, 2, 4] {
         let mut got = vec![];
         let mut path = format!("/api/v1/domain/example.com?limit={limit}");
@@ -729,4 +742,13 @@ async fn domain_takes_the_archive_permit_when_there_is_a_dns_archive() {
     let _held = a.state.v1.enter(true).unwrap();
     let (s, _, b) = get(&a, "/api/v1/domain/example.com").await;
     assert_eq!(s, 429, "{b}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unknown_domain_with_a_cursor_is_an_empty_page() {
+    let a = app().await;
+    let start = ctprobe::query::DnsCursor::start().encode();
+    let p = page(&a, &format!("/api/v1/domain/never-seen.com?cursor={start}")).await;
+    assert!(dns_rows(&p).is_empty() && p["dns"]["next_cursor"].is_null(), "{p}");
+    assert!(p["cert_count"].is_null());
 }

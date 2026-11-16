@@ -35,6 +35,11 @@ impl DnsCursor {
         Some(DnsCursor { probed_at_ms, name })
     }
 
+    /// A cursor before every row: a page that starts here starts at the newest.
+    pub fn start() -> DnsCursor {
+        DnsCursor { probed_at_ms: i64::MAX, name: String::new() }
+    }
+
     fn of(r: &Value) -> DnsCursor {
         DnsCursor {
             probed_at_ms: r["probed_at"].as_i64().unwrap_or_default(),
@@ -241,6 +246,25 @@ mod tests {
             last_miss_ms: None,
             prev: None,
         }
+    }
+
+    /// The start cursor reads like no cursor, and its day arithmetic holds.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn start_cursor_is_before_every_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = 20_000 * MS_PER_DAY;
+        let mut w = Writer::open(dir.path(), 0).unwrap();
+        w.push_dns(probe(d + 5, "1.1.1.1"));
+        w.push_dns(probe(d + MS_PER_DAY + 5, "2.2.2.2"));
+        w.flush(1).unwrap();
+        w.publish(1).unwrap();
+        let e = QueryEngine::open(dir.path()).unwrap();
+        let far = Instant::now() + Duration::from_secs(30);
+        let plain = e.tier_dns("one.com", 10, None, far).await.unwrap();
+        let start = DnsCursor::decode(&DnsCursor::start().encode()).unwrap();
+        let from_start = e.tier_dns("one.com", 10, Some(start), far).await.unwrap();
+        assert_eq!(plain.rows.len(), 2);
+        assert_eq!(plain.rows, from_start.rows);
     }
 
     /// A clock with time for the first `n` asks and none after.

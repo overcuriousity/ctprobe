@@ -18,6 +18,12 @@ pub(super) struct DomainParams {
     cursor: Option<String>,
 }
 
+/// Where a page that found nothing in time continues: the request's own
+/// cursor, or the start of the history. `cut_short` pages always have one.
+fn resume_cursor(request: Option<&str>) -> String {
+    request.map_or_else(|| DnsCursor::start().encode(), str::to_string)
+}
+
 pub(super) async fn domain(
     State(s): State<AppState>,
     Path(raw): Path<String>,
@@ -34,10 +40,11 @@ pub(super) async fn domain(
     };
     let _permits = s.v1.enter(s.engine.has_dns_archive())?;
     let hit = s.engine.search_domains_until(&reg, Mode::Exact, 1, deadline).await?.into_iter().find(|h| h.domain == reg);
-    // With the summary in hand, a walk that finds nothing in time still answers.
+    // With the summary in hand, a walk that finds nothing in time still answers,
+    // with a cursor to try again from.
     let (rows, next_cursor, cut_short) = match s.engine.tier_dns(&reg, limit, after.clone(), deadline).await {
         Ok(page) => (page.rows, page.next_cursor, page.cut_short),
-        Err(QueryError::Timeout) if hit.is_some() => (vec![], cursor.map(str::to_string), true),
+        Err(QueryError::Timeout) if hit.is_some() => (vec![], Some(resume_cursor(cursor)), true),
         Err(e) => return Err(e.into()),
     };
     if hit.is_none() && rows.is_empty() && after.is_none() {
@@ -50,4 +57,15 @@ pub(super) async fn domain(
         "cert_count": hit.as_ref().map(|h| h.cert_count),
         "dns": { "rows": rows, "next_cursor": next_cursor, "cut_short": cut_short },
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_cut_short_page_always_has_a_cursor() {
+        assert_eq!(DnsCursor::decode(&resume_cursor(None)), Some(DnsCursor::start()));
+        assert_eq!(resume_cursor(Some("abc")), "abc");
+    }
 }
