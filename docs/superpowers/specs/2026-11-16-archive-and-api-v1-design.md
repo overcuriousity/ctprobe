@@ -79,11 +79,13 @@ Three optional top-level keys:
 | Key | Meaning | Unset |
 |-----|---------|-------|
 | `hot_days` | Days of `certs` kept in the hot tier | No age limit, as today |
-| `dns_days` | Days of `dns` kept in the hot tier | Follows `hot_days` |
+| `dns_days` | Days of `dns` kept in the hot tier | 365, or `hot_days` if that is larger; no age limit when `hot_days` is unset too |
 | `archive_budget` | Size limit of the archive; setting it enables the archive | No archive is written |
 
 With none of them set, behaviour is exactly as today. `hot_days` and
-`dns_days` must be at least 1.
+`dns_days` must be at least 1. Full DNS detail is meant to outlive full cert
+detail, so a `dns_days` below `hot_days` is accepted but logged as a warning
+at start.
 
 ### Layout
 
@@ -152,7 +154,9 @@ that names the day. Nothing in the archive is ever deleted automatically.
    `archive` marker and a `dns` day the `archive-dns` marker. A day with no
    hot `dns` directory gets the `archive-dns` marker without a file.
 3. Budget: as today, except that the measured size excludes `archive/`. With
-   the archive enabled, archived days go first, oldest first. Unarchived
+   the archive enabled, archived days go first, oldest first. Days are
+   removed whole and oldest first as today, so under budget pressure the old
+   days that hold only `dns` go before any recent `certs` day. Unarchived
    finished days go only to stay under the hard budget, the same last resort
    that unfinished days are today, and each such deletion is logged as an
    error. **This is a call, see below.**
@@ -268,7 +272,9 @@ pinned. These tests must stay green through every later step.
   alternative is to pause ingest.
 - At a full `archive_budget`, archiving stops with a warning; nothing is
   deleted and there is no status endpoint for it.
-- `dns_days` follows `hot_days` when unset.
+- `dns_days` defaults to 365 (the owner asked for much longer than `hot_days`;
+  the number is the author's).
+- Under budget pressure old `dns`-only days go before recent `certs` days.
 - CNAMEs are left out of the DNS archive.
 - The DNS archive keeps each name's first answer of every day, not only
   changes across days. It costs more rows but every day is self-contained.
