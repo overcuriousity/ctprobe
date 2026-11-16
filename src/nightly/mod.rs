@@ -108,12 +108,13 @@ pub fn cleanup(data: &Path) -> Result<()> {
 }
 
 /// Finished days present on disk that the nightly job has not completed.
-/// With `archive`, days whose archive step is unfinished are pending too.
+/// With `archive`, days whose archive step is unfinished are pending too, and
+/// a day that holds only `dns` counts, so that it is archived and can age out.
 pub fn pending_days(data: &Path, today: NaiveDate, archive: bool) -> Vec<NaiveDate> {
-    let mut out: Vec<NaiveDate> = std::fs::read_dir(data.join("certs"))
-        .into_iter()
-        .flatten()
-        .flatten()
+    let tables: &[&str] = if archive { &["certs", "dns"] } else { &["certs"] };
+    let mut out: Vec<NaiveDate> = tables
+        .iter()
+        .flat_map(|t| std::fs::read_dir(data.join(t)).into_iter().flatten().flatten())
         .filter_map(|e| {
             let n = e.file_name().to_string_lossy().into_owned();
             NaiveDate::parse_from_str(n.strip_prefix("day=")?, "%Y-%m-%d").ok()
@@ -124,6 +125,7 @@ pub fn pending_days(data: &Path, today: NaiveDate, archive: bool) -> Vec<NaiveDa
         })
         .collect();
     out.sort();
+    out.dedup();
     out
 }
 

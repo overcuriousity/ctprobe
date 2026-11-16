@@ -423,6 +423,71 @@ mod dns_archive {
         assert_eq!(nightly::pending_days(d.path(), today, true), vec![day()]);
     }
 
+    fn markers(dir: &Path, steps: &[&str]) {
+        std::fs::create_dir_all(dir.join("nightly")).unwrap();
+        for s in steps {
+            std::fs::write(dir.join("nightly").join(format!("{DAY}.{s}")), b"").unwrap();
+        }
+    }
+
+    fn marked(dir: &Path, step: &str) -> bool {
+        dir.join("nightly").join(format!("{DAY}.{step}")).exists()
+    }
+
+    /// The certs of a finished day aged out before the archive was enabled;
+    /// its dns is still hot.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dns_only_finished_day_is_archived() {
+        let d = tempfile::tempdir().unwrap();
+        seed_dns(d.path(), vec![ok("www.a.com", 1, &["1.1.1.1"])]);
+        markers(d.path(), &["rollups", "compact", "domains"]);
+        let today = NaiveDate::from_ymd_opt(2024, 10, 5).unwrap();
+        assert!(nightly::pending_days(d.path(), today, false).is_empty(), "archive off: as before");
+        assert_eq!(nightly::pending_days(d.path(), today, true), vec![day()]);
+        let mut c = cfg(d.path());
+        c.archive_budget_bytes = Some(1 << 30);
+        nightly::run_nightly(&c, day()).await.unwrap();
+        assert!(archive_file(d.path(), "dns", DAY).exists());
+        assert!(marked(d.path(), "archive-dns") && marked(d.path(), "archive"));
+        assert!(!archive_file(d.path(), "certs", DAY).exists());
+        assert!(!d.path().join("certs").exists(), "nothing recreated for certs");
+        assert!(nightly::pending_days(d.path(), today, true).is_empty());
+    }
+
+    /// A day that never had certs runs every step.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dns_only_unfinished_day_runs_every_step() {
+        let d = tempfile::tempdir().unwrap();
+        seed_dns(d.path(), vec![ok("www.a.com", 1, &["1.1.1.1"])]);
+        let today = NaiveDate::from_ymd_opt(2024, 10, 5).unwrap();
+        assert_eq!(nightly::pending_days(d.path(), today, true), vec![day()]);
+        let mut c = cfg(d.path());
+        c.archive_budget_bytes = Some(1 << 30);
+        nightly::run_nightly(&c, day()).await.unwrap();
+        for s in ["rollups", "compact", "domains", "archive", "archive-dns"] {
+            assert!(marked(d.path(), s), "{s}");
+        }
+        assert!(archive_file(d.path(), "dns", DAY).exists());
+        assert!(!d.path().join("certs").exists(), "nothing recreated for certs");
+        assert!(nightly::pending_days(d.path(), today, true).is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn normal_day_gets_both_archives_in_one_run() {
+        let d = tempfile::tempdir().unwrap();
+        seed_certs(d.path(), vec![row("1", "a.com", D, "LE", 90, RenewalClass::New)]);
+        seed_dns(d.path(), vec![ok("www.a.com", 1, &["1.1.1.1"])]);
+        let mut c = cfg(d.path());
+        c.archive_budget_bytes = Some(1 << 30);
+        nightly::run_nightly(&c, day()).await.unwrap();
+        for t in ["certs", "dns"] {
+            assert!(archive_file(d.path(), t, DAY).exists(), "{t}");
+        }
+        assert!(marked(d.path(), "archive") && marked(d.path(), "archive-dns"));
+        let today = NaiveDate::from_ymd_opt(2024, 10, 5).unwrap();
+        assert!(nightly::pending_days(d.path(), today, true).is_empty());
+    }
+
     #[test]
     fn a_missing_dns_marker_keeps_the_day_pending() {
         let d = tempfile::tempdir().unwrap();
