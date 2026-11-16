@@ -68,6 +68,9 @@ async fn seed(dir: &Path) -> QueryEngine {
         include_test_logs: false,
         coverage_target: 95.0,
         dns: Default::default(),
+        hot_days: None,
+        dns_days: None,
+        archive_budget_bytes: None,
     };
     nightly::run_nightly(&cfg, chrono::NaiveDate::from_ymd_opt(2024, 10, 4).unwrap()).await.unwrap();
     w.push_cert(row("today", &["paypai.org"], D + DAY_MS));

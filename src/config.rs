@@ -1,3 +1,4 @@
+use crate::nightly::expire::Retention;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::net::SocketAddr;
@@ -23,6 +24,23 @@ pub struct Config {
     /// Percent of certificates the coverage assessment aims for.
     pub coverage_target: f64,
     pub dns: DnsConfig,
+    /// Days certificates stay in the hot tier; unset keeps today's behaviour.
+    pub hot_days: Option<u32>,
+    /// Days of DNS probes kept, as written in the file.
+    pub dns_days: Option<u32>,
+    /// Ceiling for the archive directory; unset means no archive tier.
+    pub archive_budget_bytes: Option<u64>,
+}
+
+impl Config {
+    pub fn retention(&self) -> Retention {
+        Retention {
+            budget: self.disk_budget_bytes,
+            hot_days: self.hot_days,
+            dns_days: self.dns_days.or(self.hot_days.map(|h| h.max(365))),
+            archive: self.archive_budget_bytes.is_some(),
+        }
+    }
 }
 
 /// DNS probing of certificate names. Off while no resolver is set.
@@ -110,6 +128,9 @@ struct RawConfig {
     coverage_target: Option<f64>,
     #[serde(default)]
     dns: RawDns,
+    hot_days: Option<u32>,
+    dns_days: Option<u32>,
+    archive_budget: Option<String>,
 }
 
 fn parse_size(s: &str) -> Result<u64> {
@@ -134,6 +155,17 @@ impl Config {
         if !(coverage_target > 0.0 && coverage_target <= 100.0) {
             bail!("coverage_target {coverage_target} must be above 0 and at most 100");
         }
+        if raw.hot_days == Some(0) {
+            bail!("hot_days must be at least 1");
+        }
+        if raw.dns_days == Some(0) {
+            bail!("dns_days must be at least 1");
+        }
+        if let (Some(d), Some(h)) = (raw.dns_days, raw.hot_days) {
+            if d < h {
+                tracing::warn!("dns_days {d} is below hot_days {h}: DNS probes expire before their certificates");
+            }
+        }
         Ok(Config {
             bind: raw.bind,
             data_dir: raw.data_dir,
@@ -146,6 +178,9 @@ impl Config {
             include_test_logs: raw.include_test_logs,
             coverage_target,
             dns: raw.dns.build()?,
+            hot_days: raw.hot_days,
+            dns_days: raw.dns_days,
+            archive_budget_bytes: raw.archive_budget.as_deref().map(parse_size).transpose()?,
         })
     }
 }
@@ -195,5 +230,49 @@ mod tests {
         }
         std::fs::write(&p, format!("{base}coverage_target = 100\n")).unwrap();
         assert!(Config::load(&p).is_ok());
+    }
+
+    fn load_keys(extra: &str) -> Result<Config> {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("c.toml");
+        let base = "bind = \"0.0.0.0:1\"\ndata_dir = \"d\"\ndisk_budget = \"1GiB\"\ntracker_max = \"1GiB\"\n";
+        std::fs::write(&p, format!("{base}{extra}")).unwrap();
+        Config::load(&p)
+    }
+
+    #[test]
+    fn keys_default_to_none() {
+        let c = load_keys("").unwrap();
+        assert_eq!((c.hot_days, c.dns_days, c.archive_budget_bytes), (None, None, None));
+        assert_eq!(c.retention(), Retention { budget: 1 << 30, hot_days: None, dns_days: None, archive: false });
+    }
+
+    #[test]
+    fn dns_days_defaults_to_a_year() {
+        assert_eq!(load_keys("hot_days = 90\n").unwrap().retention().dns_days, Some(365));
+    }
+
+    #[test]
+    fn dns_days_follows_long_hot() {
+        assert_eq!(load_keys("hot_days = 400\n").unwrap().retention().dns_days, Some(400));
+    }
+
+    #[test]
+    fn dns_days_explicit_wins() {
+        let c = load_keys("hot_days = 90\ndns_days = 30\n").unwrap();
+        assert_eq!(c.retention().dns_days, Some(30));
+    }
+
+    #[test]
+    fn zero_days_rejected() {
+        assert!(load_keys("hot_days = 0\n").is_err());
+        assert!(load_keys("dns_days = 0\n").is_err());
+    }
+
+    #[test]
+    fn archive_budget_parses() {
+        let c = load_keys("archive_budget = \"2GiB\"\n").unwrap();
+        assert_eq!(c.archive_budget_bytes, Some(2 << 30));
+        assert!(c.retention().archive);
     }
 }

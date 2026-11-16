@@ -56,6 +56,9 @@ Then start it:
 | `extra_log_lists` | Further lists, by default Apple's. A log on any list is followed. A list that cannot be read is skipped and its logs are kept |
 | `include_test_logs` | Also follows the stateless logs on Google's full list, which appear to be test or staging logs. Off by default, because they then count in every figure except coverage |
 | `coverage_target` | Percent of certificates the coverage assessment aims for, default 95. It only advises: ctprobe keeps following every log |
+| `hot_days` | Days certificates stay in the hot tier before moving to the archive. Unset by default: certificates are kept until the budget forces expiry |
+| `dns_days` | Days of DNS probes kept. Defaults to `hot_days`, at least 365, when `hot_days` is set. A value below `hot_days` logs a warning |
+| `archive_budget` | Ceiling for the archive directory, in `GiB` or `MiB`. Unset by default: no archive tier |
 | `[dns] resolver` | Recursive resolver for DNS probing, such as `"127.0.0.1:5335"`. Without it, nothing is probed |
 | `[dns] max_qps` | Queries per second to the resolver, default 2000. Each probe sends two, A and AAAA. Names that do not fit in a burst are skipped and counted |
 | `[dns] sample_pct` | Percent of names probed, default 100. Chosen by a hash of the name, so the same names are probed on every certificate |

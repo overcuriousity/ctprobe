@@ -7,6 +7,17 @@ use std::path::{Path, PathBuf};
 
 const SIGHTINGS_DAYS: i64 = 14;
 
+/// How long data is kept, resolved from the configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Retention {
+    pub budget: u64,
+    pub hot_days: Option<u32>,
+    /// Explicit `dns_days`, else `hot_days` raised to at least a year.
+    pub dns_days: Option<u32>,
+    /// An archive budget is set.
+    pub archive: bool,
+}
+
 /// Day directories of a table, oldest first.
 fn days(table_dir: &Path) -> Vec<(NaiveDate, PathBuf)> {
     let mut out: Vec<_> = std::fs::read_dir(table_dir)

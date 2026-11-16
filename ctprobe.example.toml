@@ -13,6 +13,13 @@ include_test_logs = false
 # Percent of certificates the coverage assessment aims for.
 coverage_target = 95
 
+# Days certificates stay in the hot tier before moving to the archive. Unset: keep until the budget forces expiry.
+# hot_days = 90
+# Days of DNS probes kept. Defaults to hot_days, at least 365.
+# dns_days = 365
+# Ceiling for the archive directory, in GiB or MiB. Unset: no archive tier.
+# archive_budget = "20GiB"
+
 # DNS probing of every certificate name, through a recursive resolver of our own.
 [dns]
 resolver = "127.0.0.1:5335"

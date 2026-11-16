@@ -43,6 +43,9 @@ async fn app_with(log: MockLog, dns: ctprobe::config::DnsConfig) -> App {
         include_test_logs: false,
         coverage_target: 95.0,
         dns,
+        hot_days: None,
+        dns_days: None,
+        archive_budget_bytes: None,
     };
     let opts = PipelineOpts {
         logs: Some(vec![LogSpec {
