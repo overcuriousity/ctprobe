@@ -9,7 +9,7 @@ use super::{TierPage, BASE64};
 use crate::nightly::archive::DNS_CHANGES_SQL;
 use crate::query::sql::{quote, MS_PER_DAY};
 use crate::query::{QueryEngine, QueryError};
-use crate::store::{archive_dns_schema, day_string, list_archive, list_day};
+use crate::store::{archive_dns_schema, list_archive};
 use base64::Engine;
 use serde_json::{Map, Value};
 use std::cmp::Reverse;
@@ -123,13 +123,14 @@ impl DayFetch for DnsFetch<'_> {
         &self,
         day: i64,
         files: Option<&[PathBuf]>,
+        hot: bool,
         start: Option<&DnsCursor>,
         n: usize,
         t: Duration,
         _left: Left<'_>,
     ) -> Result<Got<DnsCursor>, QueryError> {
         let rows = match files {
-            Some(files) => self.engine.archive_dns_day(self.reg, day, files, start, n, t).await?,
+            Some(files) => self.engine.archive_dns_day(self.reg, day, files, hot, start, n, t).await?,
             None => self.engine.hot_dns_day(self.reg, day, start, n, t).await?,
         };
         let next = rows.last().map(DnsCursor::of);
@@ -172,12 +173,14 @@ impl QueryEngine {
     }
 
     /// One day from its archive file, outside the limiter. The day is `hot`
-    /// while its hot files remain.
+    /// while its hot files remain, as the walk's listing found.
+    #[allow(clippy::too_many_arguments)]
     async fn archive_dns_day(
         &self,
         reg: &str,
         day: i64,
         files: &[PathBuf],
+        hot: bool,
         start: Option<&DnsCursor>,
         n: usize,
         t: Duration,
@@ -191,7 +194,7 @@ impl QueryEngine {
             conds.join(" AND ")
         );
         let found = objects(self.run_archive(files.to_vec(), archive_dns_schema(), sql, n, t).await?);
-        let tier = if list_day(&self.data, "dns", &day_string(lo)).is_empty() { "archive" } else { "hot" };
+        let tier = if hot { "hot" } else { "archive" };
         Ok(found.into_iter().map(|o| row(tier, o)).collect())
     }
 

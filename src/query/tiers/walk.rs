@@ -80,11 +80,14 @@ pub(super) trait DayFetch: Sync {
     /// Tests SQL could not make exact: row order against the request's
     /// cursor and anything else the walk filters in Rust.
     fn keep(&self, row: &Value, after: Option<&Self::Cursor>) -> bool;
-    /// One query of a day. `files` are its archive files, if it has any.
+    /// One query of a day. `files` are its archive files, if it has any;
+    /// `hot` tells whether it still has hot files.
+    #[allow(clippy::too_many_arguments)]
     fn day_rows(
         &self,
         day: i64,
         files: Option<&[PathBuf]>,
+        hot: bool,
         start: Option<&Self::Start>,
         n: usize,
         t: Duration,
@@ -109,7 +112,7 @@ pub(super) struct Listing {
     /// Archive files by the days they hold.
     pub(super) archive: BTreeMap<i64, Vec<PathBuf>>,
     /// Days with hot files inside the range.
-    pub(super) hot: Vec<i64>,
+    pub(super) hot: HashSet<i64>,
     /// Days the domain index covers.
     pub(super) marked: HashSet<i64>,
 }
@@ -132,7 +135,7 @@ impl QueryEngine {
         let data = self.data.clone();
         let job = self.rt.spawn_blocking(move || Listing {
             archive: archive_days(&data, table, ts),
-            hot: days_of(&data, table, from, to),
+            hot: days_of(&data, table, from, to).into_iter().collect(),
             marked: days_done(&data, "domains").into_iter().map(epoch_day).collect(),
         });
         tokio::time::timeout(t, job)
@@ -191,7 +194,8 @@ impl QueryEngine {
                 };
                 let n = want - out.len();
                 let files = listing.archive.get(&day).map(Vec::as_slice);
-                let got = match fetch.day_rows(day, files, start.as_ref(), n, t, &mut *left).await {
+                let hot = listing.hot.contains(&day);
+                let got = match fetch.day_rows(day, files, hot, start.as_ref(), n, t, &mut *left).await {
                     Ok(g) => g,
                     Err(QueryError::Timeout) => {
                         cut_short = true;
@@ -291,13 +295,14 @@ impl<F: DayFetch> DayFetch for Counting<F> {
         &self,
         day: i64,
         files: Option<&[PathBuf]>,
+        hot: bool,
         start: Option<&F::Start>,
         n: usize,
         t: Duration,
         left: Left<'_>,
     ) -> Result<Got<F::Cursor>, QueryError> {
         self.days.lock().unwrap().push(day);
-        self.inner.day_rows(day, files, start, n, t, left).await
+        self.inner.day_rows(day, files, hot, start, n, t, left).await
     }
 }
 

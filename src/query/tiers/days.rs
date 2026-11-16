@@ -5,7 +5,7 @@ use super::{CertCursor, Scope};
 use crate::nightly::archive::names_of;
 use crate::query::sql::{quote, to_result, QueryResult, MEMORY, PARTITIONS};
 use crate::query::{QueryEngine, QueryError};
-use crate::store::{archive_certs_schema, certs_schema, day_string, list_day, register_files, session};
+use crate::store::{archive_certs_schema, certs_schema, register_files, session};
 use arrow::datatypes::{DataType, SchemaRef};
 use serde_json::{Map, Value};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -80,14 +80,16 @@ fn key(o: &Map<String, Value>) -> (i64, i64) {
 }
 
 impl QueryEngine {
-    /// One day from its archive files. While the day is hot its rows are
-    /// `hot`, with `detail` when the hot rows are found within the time `left`.
+    /// One day from its archive files. While the day is hot (`is_hot`, from
+    /// the walk's listing) its rows are `hot`, with `detail` when the hot rows
+    /// are found within the time `left`.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn archive_day(
         &self,
         scope: &Scope<'_>,
         day: i64,
         files: &[PathBuf],
+        is_hot: bool,
         start: Option<&Start>,
         n: usize,
         t: Duration,
@@ -106,7 +108,6 @@ impl QueryEngine {
         let mut hot = HashMap::new();
         let mut cut = false;
         let (lo, hi) = day_bounds(day);
-        let is_hot = !list_day(&self.data, "certs", &day_string(lo)).is_empty();
         if !found.is_empty() && is_hot {
             let list = |v: BTreeSet<String>| v.into_iter().collect::<Vec<_>>().join(", ");
             let primary = |o: &Map<String, Value>| {

@@ -244,13 +244,14 @@ impl DayFetch for CertFetch<'_> {
         &self,
         day: i64,
         files: Option<&[PathBuf]>,
+        hot: bool,
         start: Option<&Start>,
         n: usize,
         t: Duration,
         left: Left<'_>,
     ) -> Result<Got<CertCursor>, QueryError> {
         match files {
-            Some(files) => self.engine.archive_day(self.scope, day, files, start, n, t, left).await,
+            Some(files) => self.engine.archive_day(self.scope, day, files, hot, start, n, t, left).await,
             None => self.engine.hot_day(self.scope, day, start, n, t).await,
         }
     }
