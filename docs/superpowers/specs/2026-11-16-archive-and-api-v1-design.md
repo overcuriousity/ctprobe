@@ -28,6 +28,9 @@ The existing `/api/*` must not change, because the pipeline reads it.
 - The collapse job for old archive rows (see Approaches). Only the layout must
   allow it.
 - A multi-year index, an OpenAPI spec, authentication.
+- Choosing or dropping CT logs at runtime. Deduplication already means a
+  dropped log saves almost no storage, and load shedding belongs in the
+  consuming pipeline.
 
 ## Anti-goals
 
@@ -143,6 +146,10 @@ are archived on the next run. Until build step 4 ships, no day has the
 Before writing, the step compares the archive's size with `archive_budget`.
 At or over the budget it writes nothing, sets no marker and logs a warning
 that names the day. Nothing in the archive is ever deleted automatically.
+
+Storage is the scarce resource, so after each day the step logs the archive's
+total size, that day's bytes per archived row, and the days left until
+`archive_budget` at the average of the last 30 days.
 
 ### Retention
 
