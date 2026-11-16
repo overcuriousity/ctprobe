@@ -22,7 +22,10 @@ impl ApiError {
             ApiError::NotFound(m) => (StatusCode::NOT_FOUND, "not_found", m.clone()),
             ApiError::Busy => (StatusCode::TOO_MANY_REQUESTS, "busy", "too many requests in flight".into()),
             ApiError::Timeout => (StatusCode::GATEWAY_TIMEOUT, "timeout", "the query timed out".into()),
-            ApiError::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, "internal", m.clone()),
+            ApiError::Internal(m) => {
+                tracing::error!("api v1 internal error: {m}");
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal", "internal error".into())
+            }
         }
     }
 }
@@ -45,5 +48,19 @@ impl From<QueryError> for ApiError {
             QueryError::NotAllowed(m) => ApiError::BadRequest(m),
             QueryError::Failed(m) => ApiError::Internal(m),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn internal_hides_detail() {
+        let r = ApiError::from(QueryError::Failed("secret path /x".into())).into_response();
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let b = axum::body::to_bytes(r.into_body(), 4096).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!(v, json!({"error": {"code": "internal", "message": "internal error"}}));
     }
 }

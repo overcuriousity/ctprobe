@@ -6,7 +6,7 @@ use crate::names;
 use crate::query::Mode;
 use axum::extract::{FromRequestParts, Query};
 use axum::http::request::Parts;
-use chrono::{DateTime, NaiveDate};
+use chrono::NaiveDate;
 use serde::de::DeserializeOwned;
 
 const DEFAULT_LIMIT: usize = 100;
@@ -44,17 +44,21 @@ pub fn limit(v: Option<usize>) -> Result<usize, ApiError> {
     }
 }
 
-/// A date (`YYYY-MM-DD`, UTC) or an RFC 3339 time as milliseconds since the
-/// epoch. A bare date means its first millisecond, or with `end` its last.
+/// Milliseconds since the epoch, or a date (`YYYY-MM-DD`, UTC) meaning its
+/// first millisecond, or with `end` its last. Empty counts as absent.
 #[allow(dead_code)] // used by the certs endpoint
 pub fn when(v: Option<&str>, end: bool, name: &str) -> Result<Option<i64>, ApiError> {
-    let Some(s) = v else { return Ok(None) };
-    let bad = || ApiError::BadRequest(format!("{name} must be YYYY-MM-DD or an RFC 3339 time"));
-    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-        let start = d.and_hms_opt(0, 0, 0).ok_or_else(bad)?.and_utc().timestamp_millis();
-        return Ok(Some(if end { start + 86_400_000 - 1 } else { start }));
+    let s = match v {
+        None | Some("") => return Ok(None),
+        Some(s) => s,
+    };
+    let bad = || ApiError::BadRequest(format!("{name} must be YYYY-MM-DD or milliseconds since the epoch"));
+    if let Ok(ms) = s.parse::<i64>() {
+        return Ok(Some(ms));
     }
-    DateTime::parse_from_rfc3339(s).map(|t| Some(t.timestamp_millis())).map_err(|_| bad())
+    let d = NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| bad())?;
+    let start = d.and_hms_opt(0, 0, 0).ok_or_else(bad)?.and_utc().timestamp_millis();
+    Ok(Some(if end { start + 86_400_000 - 1 } else { start }))
 }
 
 pub fn mode(mode: Option<&str>, distance: Option<u8>) -> Result<Mode, ApiError> {
@@ -104,7 +108,9 @@ mod tests {
         assert!(mode(Some("x"), None).is_err());
         assert_eq!(when(Some("1970-01-02"), false, "from").unwrap(), Some(86_400_000));
         assert_eq!(when(Some("1970-01-01"), true, "to").unwrap(), Some(86_399_999));
-        assert_eq!(when(Some("1970-01-01T00:00:01Z"), false, "from").unwrap(), Some(1000));
+        assert_eq!(when(Some("1700000000000"), false, "from").unwrap(), Some(1_700_000_000_000));
+        assert_eq!(when(Some(""), true, "to").unwrap(), None);
+        assert!(when(Some("1970-01-01T00:00:01Z"), false, "from").is_err());
         assert!(when(Some("yesterday"), false, "from").is_err());
         assert_eq!(when(None, false, "from").unwrap(), None);
     }

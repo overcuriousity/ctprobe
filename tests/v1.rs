@@ -120,7 +120,12 @@ async fn bad_inputs_are_400() {
         "/api/v1/search?q=",
         "/api/v1/search?q=%20%20",
         "/api/v1/search",
-    ] {
+    ]
+    .into_iter()
+    .map(String::from)
+    .chain([format!("/api/v1/search?q={}", "a".repeat(254))])
+    {
+        let p = p.as_str();
         let (s, _, b) = get(&a, p).await;
         assert_eq!(s, 400, "{p}: {b}");
         assert_eq!(code(&b), "bad_request", "{p}");
@@ -145,4 +150,15 @@ async fn legacy_api_unaffected_when_busy() {
     let _p2 = a.state.v1.enter(false).unwrap();
     let (s, _, _) = get(&a, "/api/search?q=a").await;
     assert_eq!(s, 200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wrong_method_and_bare_prefix_are_json_404() {
+    let a = app().await;
+    let r = reqwest::Client::new().post(format!("{}/api/v1/search?q=a", a.base)).send().await.unwrap();
+    assert_eq!(r.status(), 404);
+    assert_eq!(code(&r.json().await.unwrap()), "not_found");
+    let (s, _, b) = get(&a, "/api/v1").await;
+    assert_eq!(s, 404);
+    assert_eq!(code(&b), "not_found");
 }
