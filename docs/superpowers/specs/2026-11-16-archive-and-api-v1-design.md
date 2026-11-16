@@ -66,9 +66,9 @@ The existing `/api/*` must not change, because the pipeline reads it.
 must accept any `*.parquet` file in an archive directory so that a later job
 can replace a set of daily files with one collapsed file.
 
-For DNS, the archive keeps a row only when a name is first seen or its answer
-changes, instead of one row per probe. The prober already records the previous
-answer on each probe, so no merge across days is needed.
+For DNS, the archive keeps a name's first answer of each day and every change
+within the day, instead of one row per probe. Each daily file stands on its
+own, so no merge across days is needed.
 
 ## Design
 
@@ -122,17 +122,21 @@ lets a reader fetch the full hot row through the hot file's bloom filter.
 | `v4`, `v6` | List<Utf8> |
 
 Source: that day's hot `dns` rows with `kind = 'name'`. Per name, in time
-order, a row is kept when `status`, `v4` or `v6` differ from the name's
-previous row that day. The name's first row of the day is kept when it has no
-previous answer (`prev_status` is null) or `changed` is true. CNAMEs are not
-archived. Names the DNS sampler skips have no history.
+order, the first row of the day is always kept, and a later row is kept when
+`status`, `v4` or `v6` differ from the name's previous row that day. The
+prober's `prev_*` and `changed` columns are not used: they come from an
+in-memory table that can hold answers from days that were never archived, so
+relying on them would leave names without a baseline. CNAMEs are not archived.
+Names the DNS sampler skips have no history.
 
 ### Nightly
 
-A new step `archive` runs after `domains`, recorded by the marker
-`<day>.archive`, only when the archive is enabled. `pending_days` then also
-returns finished days that lack this marker, so days still in the hot tier
-when the archive is first enabled are archived on the next run.
+Two new steps run after `domains`, only when the archive is enabled:
+`archive` for certs (marker `<day>.archive`) and `archive-dns` (marker
+`<day>.archive-dns`). `pending_days` then also returns finished days that
+lack either marker, so days still in the hot tier when a step first exists
+are archived on the next run. Until build step 4 ships, no day has the
+`archive-dns` marker.
 
 Before writing, the step compares the archive's size with `archive_budget`.
 At or over the budget it writes nothing, sets no marker and logs a warning
@@ -144,8 +148,9 @@ that names the day. Nothing in the archive is ever deleted automatically.
 
 1. `sightings` as today.
 2. Age: `certs` days older than `hot_days` and `dns` days older than
-   `dns_days` are deleted. With the archive enabled, only days that have the
-   `archive` marker.
+   `dns_days` are deleted. With the archive enabled, a `certs` day needs the
+   `archive` marker and a `dns` day the `archive-dns` marker. A day with no
+   hot `dns` directory gets the `archive-dns` marker without a file.
 3. Budget: as today, except that the measured size excludes `archive/`. With
    the archive enabled, archived days go first, oldest first. Unarchived
    finished days go only to stay under the hard budget, the same last resort
@@ -173,7 +178,10 @@ Scope, exactly one of:
 
 Filters: `from`, `to`, `expires_from`, `expires_to`, `issuer`,
 `issuer_contains`, `tld`, `wildcard`. These work on both tiers. Other filters
-of `/api/certs` are not offered in v1.
+of `/api/certs` are not offered in v1. `tld` and `wildcard` are judged per
+row in both tiers: `tld` is the public suffix of the row's `reg_domain`, and
+`wildcard` is true when one of the row's `names` is a wildcard. This differs
+from `/api/certs`, where both describe the whole certificate.
 
 Paging: `limit` (1 to 1000, default 100) and `cursor`. Order is fixed:
 `seen_at` descending, then `log_id`, `entry_index`. The cursor is an opaque
@@ -214,7 +222,9 @@ them with `cut_short: true` and a `next_cursor` to continue from.
 For one registered domain: `first_seen`, `last_seen`, `cert_count` from the
 index, and `dns`: the address history from hot `dns` and `archive/dns`
 merged, each row `{ tier, name, probed_at, status, v4, v6 }`, newest first,
-`limit` and `cursor` as above.
+`limit` and `cursor` as above. An archived day is read from the archive only.
+A day not yet archived is read from hot `dns` and reduced by the archive's
+rule at query time, so a day's rows do not change when it is archived.
 
 There is no `cert/{sha256}`. A certificate is identified by `log_id` and
 `entry_index`, and list rows already carry everything stored about it.
@@ -260,6 +270,11 @@ pinned. These tests must stay green through every later step.
   deleted and there is no status endpoint for it.
 - `dns_days` follows `hot_days` when unset.
 - CNAMEs are left out of the DNS archive.
+- The DNS archive keeps each name's first answer of every day, not only
+  changes across days. It costs more rows but every day is self-contained.
+- `tld` and `wildcard` in v1 are per row, not per certificate.
+- Cert and DNS archives have separate markers, and hot `dns` is not aged out
+  until the DNS archive step exists.
 - No `cert/{sha256}` or other single-certificate endpoint in v1.
 - v1 offers only the filters both tiers can answer.
 
