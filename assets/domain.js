@@ -20,14 +20,14 @@ function dnsSection(r) {
   clear(names).append(table(['name', 'status', 'addresses', 'first address', 'last probe', 'IP changes'],
     n.rows.map((x) => [x[i(n, 'name')], x[i(n, 'status')], addrs(x[i(n, 'v4')], x[i(n, 'v6')]),
       when(x[i(n, 'first_address_ms')]), when(x[i(n, 'last_probe_ms')]), x[i(n, 'ip_changes')]]),
-    { num: ['IP changes'], cell: (col, v) => (col === 'addresses' ? h('span', { style: 'white-space:normal;word-break:break-all', 'data-raw': '' }, v) : v) }));
+    { num: ['IP changes'], cell: (col, v) => (col === 'addresses' ? h('span', { class: 'raw', 'data-raw': '' }, v) : v) }));
   if (!c.rows.length) say(changes, 'No changes seen yet');
   else {
     clear(changes).append(table(['when', 'name', 'days since', 'before', 'after'],
       c.rows.map((x) => [when(x[i(c, 't')]), x[i(c, 'name')], x[i(c, 'prev_days')],
         x[i(c, 'prev_status')] + ' ' + addrs(x[i(c, 'prev_v4')], x[i(c, 'prev_v6')]),
         x[i(c, 'status')] + ' ' + addrs(x[i(c, 'v4')], x[i(c, 'v6')])]),
-      { num: ['days since'], cell: (col, v) => (col === 'before' || col === 'after' ? h('span', { style: 'white-space:normal;word-break:break-all', 'data-raw': '' }, v) : v) }));
+      { num: ['days since'], cell: (col, v) => (col === 'before' || col === 'after' ? h('span', { class: 'raw', 'data-raw': '' }, v) : v) }));
   }
   const resolving = n.rows.filter((x) => x[i(n, 'status')] === 'resolved').length;
   return resolving + ' of ' + n.rows.length;
@@ -57,7 +57,7 @@ $('#dns-h').append(info('dnsdomain'));
     if (r.issuers.rows.length) {
       const top = Math.max(...r.issuers.rows.map((x) => x[1]));
       clear($('#issuers')).append(...r.issuers.rows.map(([k, v]) => h('div', { class: 'bar-row', title: k + ': ' + v },
-        h('span', { style: 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap' }, k),
+        h('span', {}, k),
         h('div', { class: 'bar-track' }, h('div', { class: 'bar', style: 'width:' + (100 * v / top).toFixed(2) + '%' })),
         h('span', { class: 'n' }, fmt(v)))));
     } else none($('#issuers'));

@@ -14,13 +14,6 @@ function h(tag, attrs, ...kids) {
 }
 const $ = (s) => document.querySelector(s);
 
-// Theme: an explicit choice wins, otherwise the system setting.
-(function theme() {
-  const saved = localStorage.getItem('theme');
-  const dark = saved ? saved === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
-  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
-})();
-
 const HELP = {
   unique: 'Distinct certificates. A precertificate and its final certificate count once, however many logs carry them. This is the real issuance rate.',
   raw: 'Log entries before removing duplicates. This is what a client must download and parse if it follows every log.',
@@ -91,11 +84,12 @@ function fmtMs(ms) {
   if (ms < 7200000) return (ms / 60000).toFixed(1) + ' min';
   return (ms / 3600000).toFixed(1) + ' h';
 }
-const SERIES = ['--s1', '--s2', '--s3', '--s4', '--s5', '--s6', '--s7', '--s8'];
+const SERIES = [1, 2, 3, 4, 5, 6, 7, 8].map((n) => '--chart-cat-' + n);
 
 // A line chart with crosshair and legend values on hover.
 function lineChart(host, opts) {
   const width = Math.max(320, host.clientWidth || 600);
+  const axisFont = '12px ' + css('--font-mono');
   const chart = new uPlot({
     width, height: opts.height || 220,
     series: [{ value: (u, v) => (v === null ? '–' : opts.time === false ? fmt(v) : new Date(v * 1000).toISOString().slice(0, 16).replace('T', ' ')) },
@@ -110,8 +104,8 @@ function lineChart(host, opts) {
     legend: { show: opts.series.length > 1 || opts.legend === true },
     cursor: { drag: { x: false, y: false } },
     axes: [
-      { stroke: css('--muted'), grid: { show: false }, ticks: { stroke: css('--axis') } },
-      { stroke: css('--muted'), grid: { stroke: css('--grid'), width: 1 }, ticks: { show: false }, size: 84, values: (u, t) => t.map(opts.format || fmt) },
+      { stroke: css('--color-fg-muted'), font: axisFont, grid: { show: false }, ticks: { stroke: css('--color-border-strong') } },
+      { stroke: css('--color-fg-muted'), font: axisFont, grid: { stroke: css('--color-border-subtle'), width: 1 }, ticks: { show: false }, size: 84, values: (u, t) => t.map(opts.format || fmt) },
     ],
   }, opts.data, host);
   new ResizeObserver(() => { const w = host.clientWidth; if (w > 0 && w !== chart.width) chart.setSize({ width: w, height: chart.height }); }).observe(host);
@@ -210,13 +204,42 @@ function applyStatus(s) {
 const langBtn = $('#lang');
 langBtn.textContent = LANG === 'de' ? 'EN' : 'DE';
 langBtn.addEventListener('click', () => { localStorage.setItem('lang', LANG === 'de' ? 'en' : 'de'); location.reload(); });
+// Each button names what a click does next, not the current state.
+const label = (b, text) => { b.setAttribute('aria-label', tr(text)); b.dataset.tipLabel = tr(text); };
+const THEMES = ['system', 'light', 'dark'];
+const THEME_NEXT = { system: 'Switch to light theme', light: 'Switch to dark theme', dark: 'Use the system theme' };
 const themeBtn = $('#theme');
-function syncTheme() { themeBtn.textContent = document.documentElement.dataset.theme === 'dark' ? 'Light' : 'Dark'; }
-syncTheme();
+themeBtn.dataset.value = document.documentElement.dataset.theme || 'system';
+label(themeBtn, THEME_NEXT[themeBtn.dataset.value]);
 themeBtn.addEventListener('click', () => {
-  const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
-  localStorage.setItem('theme', next);
+  const next = THEMES[(THEMES.indexOf(themeBtn.dataset.value) + 1) % 3];
+  if (next === 'system') localStorage.removeItem('theme');
+  else localStorage.setItem('theme', next);
   location.reload(); // Charts read their colours when built.
+});
+const densityBtn = $('#density');
+function syncDensity() {
+  const compact = document.documentElement.dataset.density === 'compact';
+  densityBtn.setAttribute('aria-pressed', String(compact));
+  label(densityBtn, compact ? 'Use default text size' : 'Use compact text size');
+}
+syncDensity();
+densityBtn.addEventListener('click', () => {
+  if (document.documentElement.dataset.density === 'compact') {
+    delete document.documentElement.dataset.density;
+    localStorage.removeItem('density');
+  } else {
+    document.documentElement.dataset.density = 'compact';
+    localStorage.setItem('density', 'compact');
+  }
+  syncDensity();
+});
+// Paper is printed light, whatever the screen shows.
+let screenTheme;
+addEventListener('beforeprint', () => { screenTheme = document.documentElement.dataset.theme; document.documentElement.dataset.theme = 'light'; });
+addEventListener('afterprint', () => {
+  if (screenTheme) document.documentElement.dataset.theme = screenTheme;
+  else delete document.documentElement.dataset.theme;
 });
 
 // Certificate table with filters, shared by Search and Domain. Sorting, filtering
@@ -245,9 +268,9 @@ function certPanel(host, base, initial) {
   const fields = {
     from: h('input', { type: 'datetime-local', 'aria-label': 'From', title: 'From' }),
     to: h('input', { type: 'datetime-local', 'aria-label': 'To', title: 'To' }),
-    issuer_contains: h('input', { type: 'text', placeholder: 'Issuer contains', style: 'width:170px', 'aria-label': 'Issuer contains' }),
-    tld: h('input', { type: 'text', placeholder: 'TLD', style: 'width:90px', 'aria-label': 'TLD' }),
-    key_type: h('input', { type: 'text', placeholder: 'Key type', style: 'width:110px', 'aria-label': 'Key type' }),
+    issuer_contains: h('input', { type: 'text', placeholder: 'Issuer contains', class: 'w-m', 'aria-label': 'Issuer contains' }),
+    tld: h('input', { type: 'text', placeholder: 'TLD', class: 'w-s', 'aria-label': 'TLD' }),
+    key_type: h('input', { type: 'text', placeholder: 'Key type', class: 'w-s', 'aria-label': 'Key type' }),
     validity: choice('validity', 'Any validity', ['<=7d', '<=47d', '<=100d', '<=200d', '>200d'].map((v) => [v])),
     san: choice('san', 'Any SAN count', ['1', '2', '3-5', '6-10', '11-100', '>100'].map((v) => [v])),
     size: choice('size', 'Any size', ['<1 KiB', '1-2 KiB', '2-4 KiB', '4-16 KiB', '>=16 KiB'].map((v) => [v])),
@@ -257,7 +280,7 @@ function certPanel(host, base, initial) {
     dns: choice('dns', 'DNS: any', [['address', 'DNS: a name had an address'], ['no_address', 'DNS: no name had an address'], ['ip_changed', 'DNS: IP changed']]),
     expires_from: h('input', { type: 'date', 'aria-label': 'Expires from', title: 'Expires from' }),
     expires_to: h('input', { type: 'date', 'aria-label': 'Expires to', title: 'Expires to' }),
-    random: h('input', { type: 'number', min: '1', max: '100000', placeholder: 'Random N', style: 'width:100px', 'aria-label': 'Random sample size' }),
+    random: h('input', { type: 'number', min: '1', max: '100000', placeholder: 'Random N', class: 'w-s', 'aria-label': 'Random sample size' }),
   };
   for (const [k, e] of Object.entries(fields)) if (f[k]) e.value = k === 'from' || k === 'to' ? toLocalInput(f[k]) : f[k];
   const collect = () => {
@@ -278,8 +301,8 @@ function certPanel(host, base, initial) {
   const chips = h('span', { class: 'chips' });
   const out = h('div', { class: 'scroll' });
   const count = h('span', { class: 'note' });
-  const prev = h('button', { type: 'button', class: 'ghost small', on: { click: () => { offset = Math.max(0, offset - PAGE_ROWS); load(); } } }, 'Previous');
-  const next = h('button', { type: 'button', class: 'ghost small', on: { click: () => { offset += PAGE_ROWS; load(); } } }, 'Next');
+  const prev = h('button', { type: 'button', on: { click: () => { offset = Math.max(0, offset - PAGE_ROWS); load(); } } }, 'Previous');
+  const next = h('button', { type: 'button', on: { click: () => { offset += PAGE_ROWS; load(); } } }, 'Next');
   function keepInUrl() {
     const u = new URLSearchParams(location.search);
     [...CERT_FILTERS, 'sort', 'dir', 'offset'].forEach((k) => u.delete(k));
@@ -290,7 +313,7 @@ function certPanel(host, base, initial) {
   }
   function showChips() {
     clear(chips);
-    if (f.issuer) chips.append(h('button', { type: 'button', class: 'ghost small', title: 'Remove filter', on: { click: () => { delete f.issuer; offset = 0; load(); } } }, 'Issuer: ' + f.issuer + ' ×'));
+    if (f.issuer) chips.append(h('button', { type: 'button', title: 'Remove filter', on: { click: () => { delete f.issuer; offset = 0; load(); } } }, 'Issuer: ' + f.issuer + ' ×'));
   }
   function head() {
     const random = Boolean(f.random);
@@ -394,7 +417,7 @@ function signed(n) {
 
 function logTable(host, opts) {
   opts = opts || {};
-  const text = h('input', { type: 'search', placeholder: 'Filter by log name', 'aria-label': 'Filter logs by name', style: 'min-width:220px' });
+  const text = h('input', { type: 'search', placeholder: 'Filter by log name', 'aria-label': 'Filter logs by name' });
   const pick = h('select', { 'aria-label': 'Filter logs by state' }, h('option', { value: '' }, 'Any state'),
     ...Object.entries(STATES).map(([k, v]) => h('option', { value: k }, v[0])));
   const tableHost = h('div', { class: 'scroll' });

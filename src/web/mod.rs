@@ -61,6 +61,7 @@ async fn asset(Path(path): Path<String>) -> Response {
     let mime = match path.rsplit('.').next() {
         Some("js") => "text/javascript; charset=utf-8",
         Some("css") => "text/css; charset=utf-8",
+        Some("woff2") => "font/woff2",
         _ => "application/octet-stream",
     };
     ([(header::CONTENT_TYPE, mime)], f.data.into_owned()).into_response()

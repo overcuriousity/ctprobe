@@ -7,7 +7,7 @@ const BADGE = {
   upper: ['warn', '▲ Upper bound'],
   none: ['bad', '– Not yet'],
 };
-const badge = (k) => h('span', { class: 'badge ' + BADGE[k][0] }, BADGE[k][1]);
+const badge = (k) => h('span', { class: 'badge own ' + BADGE[k][0] }, BADGE[k][1]);
 let exportRows = [];
 const q = () => $('#range').value.split(':');
 const trend = (m) => getJson('/api/trends/' + m + '?hours=' + q()[0] + '&bucket=' + q()[1]);
