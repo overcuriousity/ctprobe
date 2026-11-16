@@ -47,9 +47,7 @@ pub struct CoverageReport {
 }
 
 fn bits(m: &Mask) -> impl Iterator<Item = usize> + '_ {
-    m.iter().enumerate().flat_map(|(w, word)| {
-        (0..64).filter(move |b| word & (1 << b) != 0).map(move |b| w * 64 + b)
-    })
+    m.iter().enumerate().flat_map(|(w, word)| (0..64).filter(move |b| word & (1 << b) != 0).map(move |b| w * 64 + b))
 }
 
 /// Best order of keys as (bit, certificates added), lowest `tie` first on equal counts.
@@ -189,7 +187,8 @@ pub fn assess(
     }
     let total = c.certs.len() as u64;
     let now = chrono::Utc::now().timestamp_millis();
-    let mut report = CoverageReport { computed_ms: now, window_ms: now - since_ms, sampled_certs: total, ..Default::default() };
+    let mut report =
+        CoverageReport { computed_ms: now, window_ms: now - since_ms, sampled_certs: total, ..Default::default() };
     if total == 0 {
         return Ok(report);
     }
@@ -215,10 +214,7 @@ pub fn assess(
     let mut names: Vec<&str> = included.iter().map(|l| l.1.as_str()).collect();
     names.sort_unstable();
     names.dedup();
-    let op_bit: Vec<usize> = included
-        .iter()
-        .map(|l| names.iter().position(|n| *n == l.1).unwrap_or(0))
-        .collect();
+    let op_bit: Vec<usize> = included.iter().map(|l| names.iter().position(|n| *n == l.1).unwrap_or(0)).collect();
     let mut by_op: HashMap<Mask, u64> = HashMap::new();
     for (m, n) in sets {
         let mut o = [0u64; 4];

@@ -30,5 +30,5 @@ async function run() {
 $('#run').addEventListener('click', run);
 $('#q').addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.ctrlKey) run(); });
 getJson('/api/schema').then((tables) => {
-  $('#tables').append(...tables.map((t) => h('p', { style: 'margin:0 0 8px' }, h('strong', {}, t.name), h('br'), h('span', { class: 'note' }, t.columns.join(', ')))));
+  $('#tables').append(...tables.map((t) => h('p', { class: 'schema' }, h('strong', {}, t.name), h('br'), h('span', { class: 'note' }, t.columns.join(', ')))));
 });

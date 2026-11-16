@@ -6,21 +6,20 @@ use super::{MEMORY, PARTITIONS};
 use crate::metrics::dir_size;
 use crate::names::registered_domain;
 use crate::store::{
-    archive_certs_schema, archive_dns_schema, archive_file, dns_schema, list_archive, list_day, register_files,
-    session,
+    archive_certs_schema, archive_dns_schema, archive_file, dns_schema, list_archive, list_day, register_files, session,
 };
 use anyhow::{Context, Result};
 use arrow::array::{
     Array, ArrayRef, AsArray, Int32Builder, Int64Builder, ListBuilder, RecordBatch, StringBuilder,
     TimestampMillisecondBuilder,
 };
+use arrow::datatypes::SchemaRef;
 use arrow::datatypes::{Int32Type, Int64Type, TimestampMillisecondType};
 use futures::StreamExt;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use parquet::file::metadata::ParquetMetaDataReader;
 use parquet::arrow::{ArrowWriter, ProjectionMask};
-use arrow::datatypes::SchemaRef;
 use parquet::basic::{Compression, ZstdLevel};
+use parquet::file::metadata::ParquetMetaDataReader;
 use parquet::file::properties::WriterProperties;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -34,8 +33,16 @@ pub enum Outcome {
 }
 
 const COLUMNS: [&str; 10] = [
-    "seen_at", "not_before", "not_after", "issuer_cn", "issuer_org", "names", "reg_domains",
-    "primary_domain", "log_id", "entry_index",
+    "seen_at",
+    "not_before",
+    "not_after",
+    "issuer_cn",
+    "issuer_org",
+    "names",
+    "reg_domains",
+    "primary_domain",
+    "log_id",
+    "entry_index",
 ];
 const BATCH_ROWS: usize = 50_000;
 
@@ -97,8 +104,7 @@ impl Builders {
 /// The names of a certificate that belong to one of its registered domains,
 /// sorted ascending.
 pub(crate) fn names_of<'a>(names: &[&'a str], reg: &str) -> Vec<&'a str> {
-    let mut mine: Vec<&str> =
-        names.iter().copied().filter(|n| registered_domain(n).as_deref() == Some(reg)).collect();
+    let mut mine: Vec<&str> = names.iter().copied().filter(|n| registered_domain(n).as_deref() == Some(reg)).collect();
     mine.sort_unstable();
     mine
 }
@@ -187,11 +193,8 @@ async fn write_query(
     std::fs::create_dir_all(dest.parent().unwrap())?;
     let tmp = dest.with_extension("parquet.tmp");
     let mut stream = ctx.sql(sql).await?.execute_stream().await?;
-    let mut w = ArrowWriter::try_new(
-        std::fs::File::create(&tmp)?,
-        schema.clone(),
-        Some(props(&[("reg_domain", BLOOM_NDV)])),
-    )?;
+    let mut w =
+        ArrowWriter::try_new(std::fs::File::create(&tmp)?, schema.clone(), Some(props(&[("reg_domain", BLOOM_NDV)])))?;
     let mut rows = 0u64;
     while let Some(b) = stream.next().await {
         let b = b.context("archive query")?;

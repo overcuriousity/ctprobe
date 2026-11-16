@@ -20,10 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub fn day_string(ms: i64) -> String {
-    DateTime::<Utc>::from_timestamp_millis(ms)
-        .unwrap_or_default()
-        .format("%Y-%m-%d")
-        .to_string()
+    DateTime::<Utc>::from_timestamp_millis(ms).unwrap_or_default().format("%Y-%m-%d").to_string()
 }
 
 fn domain_file_day(name: &str, prefix: &str) -> Option<String> {
@@ -53,16 +50,15 @@ pub fn list_parts(data: &Path, table: &str) -> Vec<PathBuf> {
         let snap = all.iter().filter(|p| name(p).starts_with("snapshot-")).max().cloned();
         let snap_day = snap.as_ref().and_then(|p| domain_file_day(&name(p), "snapshot-"));
         let mut out: Vec<PathBuf> = snap.into_iter().collect();
-        out.extend(all.iter().filter(|p| {
-            domain_file_day(&name(p), "delta-").is_some_and(|d| Some(&d) > snap_day.as_ref())
-        }).cloned());
+        out.extend(
+            all.iter()
+                .filter(|p| domain_file_day(&name(p), "delta-").is_some_and(|d| Some(&d) > snap_day.as_ref()))
+                .cloned(),
+        );
         return out;
     }
-    let dailies: std::collections::HashSet<PathBuf> = all
-        .iter()
-        .filter(|p| p.ends_with("daily.parquet"))
-        .filter_map(|p| p.parent().map(Path::to_path_buf))
-        .collect();
+    let dailies: std::collections::HashSet<PathBuf> =
+        all.iter().filter(|p| p.ends_with("daily.parquet")).filter_map(|p| p.parent().map(Path::to_path_buf)).collect();
     all.retain(|p| p.ends_with("daily.parquet") || !p.parent().is_some_and(|d| dailies.contains(d)));
     all
 }
@@ -161,29 +157,19 @@ pub fn unpack_domain(v: u64) -> (u16, u16, u32) {
 pub fn session(data: &Path, memory: usize, partitions: usize) -> Result<SessionContext> {
     let tmp = data.join("tmp");
     std::fs::create_dir_all(&tmp)?;
-    let rt = RuntimeEnvBuilder::new()
-        .with_memory_limit(memory, 1.0)
-        .with_temp_file_path(tmp)
-        .build_arc()?;
+    let rt = RuntimeEnvBuilder::new().with_memory_limit(memory, 1.0).with_temp_file_path(tmp).build_arc()?;
     let cfg = SessionConfig::new().with_target_partitions(partitions.max(1));
     Ok(SessionContext::new_with_config_rt(cfg, rt))
 }
 
 /// Registers `files` as a table, or an empty table if there are none.
-pub async fn register_files(
-    ctx: &SessionContext,
-    name: &str,
-    schema: SchemaRef,
-    files: &[PathBuf],
-) -> Result<()> {
+pub async fn register_files(ctx: &SessionContext, name: &str, schema: SchemaRef, files: &[PathBuf]) -> Result<()> {
     if files.is_empty() {
         ctx.register_table(name, Arc::new(EmptyTable::new(schema)))?;
         return Ok(());
     }
-    let paths: Vec<String> = files
-        .iter()
-        .map(|p| Ok(std::path::absolute(p)?.to_string_lossy().into_owned()))
-        .collect::<Result<_>>()?;
+    let paths: Vec<String> =
+        files.iter().map(|p| Ok(std::path::absolute(p)?.to_string_lossy().into_owned())).collect::<Result<_>>()?;
     let df = ctx.read_parquet(paths, ParquetReadOptions::default().schema(&schema)).await?;
     ctx.register_table(name, df.into_view())?;
     Ok(())

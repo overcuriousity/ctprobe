@@ -1,9 +1,9 @@
 use super::{MEMORY, PARTITIONS};
 use crate::store::{domains_schema, pack_domain, register_files, session};
 use anyhow::Result;
-use futures::StreamExt;
 use arrow::array::{ArrayRef, AsArray, Int64Builder, RecordBatch, StringBuilder, TimestampMillisecondBuilder};
 use arrow::datatypes::{Int64Type, TimestampMillisecondType};
+use futures::StreamExt;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use std::io::BufWriter;
@@ -174,11 +174,8 @@ pub async fn run(data: &Path, day: &str) -> Result<()> {
     std::fs::rename(tmp, &snapshot)?;
     let ctx = session(data, MEMORY, PARTITIONS)?;
     register_files(&ctx, "s", domains_schema(), &[snapshot]).await?;
-    let mut sorted = ctx
-        .sql("SELECT skeleton, domain FROM s ORDER BY skeleton, domain")
-        .await?
-        .execute_stream()
-        .await?;
+    let mut sorted =
+        ctx.sql("SELECT skeleton, domain FROM s ORDER BY skeleton, domain").await?.execute_stream().await?;
     let mut set = fst::SetBuilder::new(BufWriter::new(std::fs::File::create(&skel_tmp)?))?;
     let mut key = Vec::new();
     let mut last = Vec::new();

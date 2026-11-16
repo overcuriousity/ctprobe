@@ -67,12 +67,7 @@ pub(crate) fn check(resp: reqwest::Response) -> Result<reqwest::Response, FetchE
 pub trait LogBackend: Send + Sync {
     fn tree_size(&self) -> impl Future<Output = Result<u64, FetchError>> + Send;
     /// Fetches entries from `start`, at most `limit`, below `tree_size`.
-    fn fetch(
-        &self,
-        start: u64,
-        limit: u64,
-        tree_size: u64,
-    ) -> impl Future<Output = Result<Batch, FetchError>> + Send;
+    fn fetch(&self, start: u64, limit: u64, tree_size: u64) -> impl Future<Output = Result<Batch, FetchError>> + Send;
 }
 
 #[derive(Debug, Default)]
@@ -320,24 +315,14 @@ pub fn spawn_fetcher(
             tokio::spawn(run_fetcher(b, start, tx, stats, opts, stop))
         }
         LogKind::Tiled { monitoring_url } => {
-            let b = TiledBackend::new(
-                log.id,
-                monitoring_url,
-                client,
-                opts.partial_after,
-                opts.tile_parallel,
-            );
+            let b = TiledBackend::new(log.id, monitoring_url, client, opts.partial_after, opts.tile_parallel);
             tokio::spawn(run_fetcher(b, start, tx, stats, opts, stop))
         }
     }
 }
 
 /// Fetches one entry again, for the certificate detail page.
-pub async fn fetch_entry(
-    log: &LogInfo,
-    client: reqwest::Client,
-    index: u64,
-) -> Result<RawEntry, FetchError> {
+pub async fn fetch_entry(log: &LogInfo, client: reqwest::Client, index: u64) -> Result<RawEntry, FetchError> {
     async fn one<B: LogBackend>(b: B, index: u64) -> Result<RawEntry, FetchError> {
         let size = b.tree_size().await?;
         if index >= size {

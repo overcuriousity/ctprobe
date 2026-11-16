@@ -164,7 +164,8 @@ fn old_stored_log_records_load() {
     let tx = db.begin_write().unwrap();
     {
         let mut table = tx.open_table(t).unwrap();
-        let old = r#"{"id":7,"name":"old","log_id_b64":"AA==","kind":{"Rfc6962":{"url":"https://o/"}},"state":"usable"}"#;
+        let old =
+            r#"{"id":7,"name":"old","log_id_b64":"AA==","kind":{"Rfc6962":{"url":"https://o/"}},"state":"usable"}"#;
         table.insert(7, old).unwrap();
     }
     tx.commit().unwrap();

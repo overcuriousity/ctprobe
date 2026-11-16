@@ -1,8 +1,8 @@
 use arrow::array::RecordBatch;
-use ctprobe::mocklog::{MockEntry, MockLog, MockOpts, TestCa};
-use ctprobe::pipeline::{Pipeline, PipelineOpts};
 use ctprobe::config::Config;
 use ctprobe::fetch::FetchOpts;
+use ctprobe::mocklog::{MockEntry, MockLog, MockOpts, TestCa};
+use ctprobe::pipeline::{Pipeline, PipelineOpts};
 use ctprobe::registry::{LogKind, LogSpec};
 use ctprobe::store::list_parts;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -65,12 +65,8 @@ fn rows(dir: &Path, table: &str) -> usize {
         .iter()
         .map(|p| {
             let f = std::fs::File::open(p).unwrap();
-            let b: Vec<RecordBatch> = ParquetRecordBatchReaderBuilder::try_new(f)
-                .unwrap()
-                .build()
-                .unwrap()
-                .map(|b| b.unwrap())
-                .collect();
+            let b: Vec<RecordBatch> =
+                ParquetRecordBatchReaderBuilder::try_new(f).unwrap().build().unwrap().map(|b| b.unwrap()).collect();
             b.iter().map(|x| x.num_rows()).sum::<usize>()
         })
         .sum()
@@ -176,7 +172,8 @@ async fn malformed_certificate_counted_and_skipped() {
     es.push(MockEntry { precert: false, body: vec![1, 2, 3], timestamp_ms: 1, corrupt: false });
     es.push(ca.final_cert(3, &["b.example.com"]));
     let m = MockLog::start(MockOpts::rfc6962(0).with_entries(es)).await;
-    let p = Pipeline::start(cfg(d.path()), opts(vec![spec("a", m.url(), false)], Duration::from_secs(600))).await.unwrap();
+    let p =
+        Pipeline::start(cfg(d.path()), opts(vec![spec("a", m.url(), false)], Duration::from_secs(600))).await.unwrap();
     wait_positions(&p, 2).await;
     let s = p.handle.live.snapshot();
     assert_eq!(s.logs[0].malformed, 1);

@@ -39,13 +39,7 @@ pub struct TiledBackend {
 }
 
 impl TiledBackend {
-    pub fn new(
-        log: LogId,
-        url: &str,
-        client: reqwest::Client,
-        partial_after: Duration,
-        parallel: usize,
-    ) -> Self {
+    pub fn new(log: LogId, url: &str, client: reqwest::Client, partial_after: Duration, parallel: usize) -> Self {
         TiledBackend {
             log,
             base: url.trim_end_matches('/').to_string(),
@@ -67,26 +61,14 @@ impl TiledBackend {
         if let Some(w) = width {
             url.push_str(&format!(".p/{w}"));
         }
-        let resp = self
-            .client
-            .get(url)
-            .header("accept-encoding", "gzip, identity")
-            .send()
-            .await?;
+        let resp = self.client.get(url).header("accept-encoding", "gzip, identity").send().await?;
         Ok(check(resp)?.bytes().await?)
     }
 
     /// Appends one tile's entries at or above `start`. A tile that does not
     /// decode to its full width is usually a proxy's error page, so it is retried;
     /// only one that keeps failing is counted malformed, so it cannot wedge a log.
-    fn absorb(
-        &self,
-        b: &mut Batch,
-        tile: u64,
-        width: u64,
-        data: &[u8],
-        start: u64,
-    ) -> Result<(), FetchError> {
+    fn absorb(&self, b: &mut Batch, tile: u64, width: u64, data: &[u8], start: u64) -> Result<(), FetchError> {
         b.bytes += data.len() as u64;
         let first = tile * TILE_WIDTH;
         let end = first + width;

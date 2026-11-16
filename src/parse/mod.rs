@@ -1,10 +1,7 @@
 mod leaf;
 mod x509;
 
-pub use leaf::{
-    decode_merkle_leaf, decode_tile, decode_timestamped_entry, EntryKind, TileEntry,
-    TimestampedEntryView,
-};
+pub use leaf::{decode_merkle_leaf, decode_tile, decode_timestamped_entry, EntryKind, TileEntry, TimestampedEntryView};
 pub use x509::extract;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

@@ -186,7 +186,8 @@ impl QueryEngine {
         t: Duration,
     ) -> Result<Vec<Value>, QueryError> {
         let (lo, hi) = day_bounds(day);
-        let mut conds = vec![format!("reg_domain = {}", quote(reg)), format!("CAST(probed_at AS BIGINT) BETWEEN {lo} AND {hi}")];
+        let mut conds =
+            vec![format!("reg_domain = {}", quote(reg)), format!("CAST(probed_at AS BIGINT) BETWEEN {lo} AND {hi}")];
         conds.extend(start.map(DnsCursor::sql));
         let sql = format!(
             "SELECT {} FROM a WHERE {} ORDER BY {NEWEST} LIMIT {n}",
@@ -240,13 +241,22 @@ mod tests {
 
     #[test]
     fn cursor_rejects_garbage() {
-        for s in ["", "garbage", "!!!", "W10", &BASE64.encode("[1]"), &BASE64.encode(r#"[1,2,3]"#), &BASE64.encode(r#"["a",1]"#)] {
+        for s in [
+            "",
+            "garbage",
+            "!!!",
+            "W10",
+            &BASE64.encode("[1]"),
+            &BASE64.encode(r#"[1,2,3]"#),
+            &BASE64.encode(r#"["a",1]"#),
+        ] {
             assert_eq!(DnsCursor::decode(s), None, "{s:?}");
         }
     }
 
     fn probe(at: i64, ip: &str) -> DnsRow {
-        let lookup = Lookup { status: Status::Resolved, v4: vec![ip.parse().unwrap()], v6: vec![], cnames: vec![], ttl: None };
+        let lookup =
+            Lookup { status: Status::Resolved, v4: vec![ip.parse().unwrap()], v6: vec![], cnames: vec![], ttl: None };
         DnsRow {
             probed_at_ms: at,
             name: "www.one.com".into(),

@@ -52,9 +52,21 @@ impl Last {
         let v6: Vec<String> = l.v6.iter().map(|a| a.to_string()).collect();
         let chain = l.cnames.join(",");
         let net = if l.cnames.is_empty() {
-            let mut p4: Vec<[u8; 3]> = l.v4.iter().map(|a| { let o = a.octets(); [o[0], o[1], o[2]] }).collect();
+            let mut p4: Vec<[u8; 3]> =
+                l.v4.iter()
+                    .map(|a| {
+                        let o = a.octets();
+                        [o[0], o[1], o[2]]
+                    })
+                    .collect();
             p4.dedup();
-            let mut p6: Vec<[u16; 3]> = l.v6.iter().map(|a| { let s = a.segments(); [s[0], s[1], s[2]] }).collect();
+            let mut p6: Vec<[u16; 3]> =
+                l.v6.iter()
+                    .map(|a| {
+                        let s = a.segments();
+                        [s[0], s[1], s[2]]
+                    })
+                    .collect();
             p6.dedup();
             format!("{p4:?}|{p6:?}")
         } else {

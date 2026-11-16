@@ -76,8 +76,29 @@ pub fn default_schedule() -> Vec<Duration> {
     let h = |n: u64| m(60 * n);
     let d = |n: u64| h(24 * n);
     vec![
-        Duration::ZERO, m(1), m(2), m(5), m(10), m(15), m(30), h(1), h(2), h(3), h(6), h(12),
-        d(1), h(36), d(2), d(3), d(4), d(5), d(7), d(10), d(14), d(21), d(30),
+        Duration::ZERO,
+        m(1),
+        m(2),
+        m(5),
+        m(10),
+        m(15),
+        m(30),
+        h(1),
+        h(2),
+        h(3),
+        h(6),
+        h(12),
+        d(1),
+        h(36),
+        d(2),
+        d(3),
+        d(4),
+        d(5),
+        d(7),
+        d(10),
+        d(14),
+        d(21),
+        d(30),
     ]
 }
 
@@ -461,11 +482,19 @@ struct GroupAgg {
 
 impl GroupAgg {
     fn new(probes: usize) -> GroupAgg {
-        GroupAgg { g: Group { later_by_attempt: vec![0; probes], ..Default::default() }, upper: histogram(), lower: histogram() }
+        GroupAgg {
+            g: Group { later_by_attempt: vec![0; probes], ..Default::default() },
+            upper: histogram(),
+            lower: histogram(),
+        }
     }
 
     fn report(&self) -> Group {
-        Group { time_to_dns: quantiles(&self.upper, 1.0), time_to_dns_lower: quantiles(&self.lower, 1.0), ..self.g.clone() }
+        Group {
+            time_to_dns: quantiles(&self.upper, 1.0),
+            time_to_dns_lower: quantiles(&self.lower, 1.0),
+            ..self.g.clone()
+        }
     }
 }
 
@@ -771,7 +800,11 @@ impl Scheduler {
             if let (true, Some(old)) = (first, self.last.get(p.key)) {
                 let change = diff(&old, &cur, &lookup, today);
                 let g = &mut self.groups[group_index(p.kind)].g;
-                if change.days == 0 { g.same_day.add(&change) } else { g.earlier_day.add(&change) }
+                if change.days == 0 {
+                    g.same_day.add(&change)
+                } else {
+                    g.earlier_day.add(&change)
+                }
                 if is_name && change.days > 0 {
                     let m = &mut self.minute;
                     m.compared += 1;

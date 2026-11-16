@@ -16,12 +16,7 @@ fn opts() -> FetchOpts {
     }
 }
 
-async fn collect<B: LogBackend + 'static>(
-    b: B,
-    start: Option<u64>,
-    want: usize,
-    stats: Arc<LogStats>,
-) -> Vec<u64> {
+async fn collect<B: LogBackend + 'static>(b: B, start: Option<u64>, want: usize, stats: Arc<LogStats>) -> Vec<u64> {
     let (tx, mut rx) = mpsc::channel::<Batch>(8);
     let (_stop_tx, stop) = watch::channel(false);
     let task = tokio::spawn(fetch::run_fetcher(b, start, tx, stats, opts(), stop));
@@ -48,7 +43,8 @@ fn tile_path_encoding() {
 #[tokio::test]
 async fn rfc6962_short_batches_lose_nothing() {
     let m = MockLog::start(MockOpts { max_batch: 32, ..MockOpts::rfc6962(1000) }).await;
-    let got = collect(Rfc6962Backend::new(0, &m.url(), reqwest::Client::new()), Some(0), 1000, Default::default()).await;
+    let got =
+        collect(Rfc6962Backend::new(0, &m.url(), reqwest::Client::new()), Some(0), 1000, Default::default()).await;
     assert_eq!(got, (0..1000).collect::<Vec<u64>>());
 }
 

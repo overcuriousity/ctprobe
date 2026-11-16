@@ -13,9 +13,30 @@ use serde::Deserialize;
 use serde_json::json;
 
 pub const METRICS: &[&str] = &[
-    "volume", "stages", "renewals", "issuers", "tlds", "keys", "validity", "san_dist", "der_size",
-    "peaks", "lag", "concentration", "coverage", "state_growth", "catchup", "cost", "resources",
-    "settling", "quality", "sizing", "dns", "dns_changes", "dns_ttd", "dns_sizing",
+    "volume",
+    "stages",
+    "renewals",
+    "issuers",
+    "tlds",
+    "keys",
+    "validity",
+    "san_dist",
+    "der_size",
+    "peaks",
+    "lag",
+    "concentration",
+    "coverage",
+    "state_growth",
+    "catchup",
+    "cost",
+    "resources",
+    "settling",
+    "quality",
+    "sizing",
+    "dns",
+    "dns_changes",
+    "dns_ttd",
+    "dns_sizing",
 ];
 
 const ROWS: usize = 20_000;
@@ -228,11 +249,7 @@ pub struct TrendParams {
     format: Option<String>,
 }
 
-pub async fn trends(
-    State(s): State<AppState>,
-    Path(metric): Path<String>,
-    Query(q): Query<TrendParams>,
-) -> Response {
+pub async fn trends(State(s): State<AppState>, Path(metric): Path<String>, Query(q): Query<TrendParams>) -> Response {
     let bucket = q.bucket.as_deref().unwrap_or("hour");
     if !["minute", "hour", "day"].contains(&bucket) {
         return error(StatusCode::BAD_REQUEST, "bucket must be minute, hour or day");
@@ -241,8 +258,7 @@ pub async fn trends(
     let hours = q.hours.unwrap_or(48).clamp(1, 24 * 3650);
     let from = now - Duration::hours(hours);
     let today = now.date_naive().and_hms_opt(0, 0, 0).expect("midnight").and_utc();
-    let (from_ms, to_ms, today_ms) =
-        (from.timestamp_millis(), now.timestamp_millis(), today.timestamp_millis());
+    let (from_ms, to_ms, today_ms) = (from.timestamp_millis(), now.timestamp_millis(), today.timestamp_millis());
     let Some(sql) = trend_query(&metric, from_ms, to_ms, bucket, today_ms, hours) else {
         return error(StatusCode::NOT_FOUND, "unknown metric");
     };
@@ -259,9 +275,7 @@ pub async fn trends(
 /// Tables and columns for the SQL page.
 pub async fn schema() -> Json<serde_json::Value> {
     use crate::store::*;
-    let t = |name: &str, s: arrow::datatypes::SchemaRef| {
-        json!({ "name": name, "columns": s.fields().iter().map(|f| f.name().clone()).collect::<Vec<_>>() })
-    };
+    let t = |name: &str, s: arrow::datatypes::SchemaRef| json!({ "name": name, "columns": s.fields().iter().map(|f| f.name().clone()).collect::<Vec<_>>() });
     Json(json!([
         t("certs", certs_schema()),
         t("domains", domains_schema()),

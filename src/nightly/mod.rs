@@ -135,11 +135,12 @@ pub fn pending_days(data: &Path, today: NaiveDate, archive: bool) -> Vec<NaiveDa
         })
         .filter(|d| {
             let s = d.format("%Y-%m-%d").to_string();
-            *d < today && (!step_done(data, &s, "domains") || (archive && !(step_done(data, &s, "archive") && step_done(data, &s, "archive-dns"))))
+            *d < today
+                && (!step_done(data, &s, "domains")
+                    || (archive && !(step_done(data, &s, "archive") && step_done(data, &s, "archive-dns"))))
         })
         .collect();
     out.sort();
     out.dedup();
     out
 }
-

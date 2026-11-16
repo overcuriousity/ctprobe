@@ -50,7 +50,7 @@ function drawBars(host, r, metric) {
   const total = r.rows.reduce((a, x) => a + x[1], 0);
   const hours = hoursChosen();
   host.append(...r.rows.map(([k, v]) => h('a', { class: 'bar-row', href: barLink(metric, k, hours), title: k + ': ' + v + ' (' + (100 * v / total).toFixed(1) + '%)' },
-    h('span', { style: 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap' }, k),
+    h('span', {}, k),
     h('div', { class: 'bar-track' }, h('div', { class: 'bar', style: 'width:' + (100 * v / top).toFixed(2) + '%' })),
     h('span', { class: 'n' }, fmt(v)))));
 }

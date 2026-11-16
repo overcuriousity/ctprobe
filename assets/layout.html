@@ -4,8 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{title}} · ctprobe</title>
-<link rel="stylesheet" href="/assets/uplot.min.css">
-<link rel="stylesheet" href="/assets/app.css">
+<link rel="stylesheet" href="/assets/tokens.css?v={{v}}">
+<link rel="stylesheet" href="/assets/uplot.min.css?v={{v}}">
+<link rel="stylesheet" href="/assets/app.css?v={{v}}">
+<script src="/assets/theme.js?v={{v}}"></script>
 </head>
 <body data-page="{{page}}">
 <header class="top">
@@ -18,16 +20,19 @@
     <a href="/sql" data-nav="sql">SQL</a>
   </nav>
   <span id="status" class="status" role="status"></span>
-  <button id="lang" class="ghost small" type="button" aria-label="Switch language">EN</button>
-  <button id="theme" class="ghost small" type="button" aria-label="Switch colour theme">Theme</button>
+  <div class="top-end">
+    <button id="lang" type="button" aria-label="Switch language">EN</button>
+    <button id="density" class="icon" type="button" aria-pressed="false"><svg class="icon" aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m15 16 2.536-7.328a1.02 1.02 1 0 1 1.928 0L22 16" /><path d="M15.697 14h5.606" /><path d="m2 16 4.039-9.69a.5.5 0 0 1 .923 0L11 16" /><path d="M3.304 13h6.392" /></svg></button>
+    <button id="theme" class="icon" type="button"><svg class="icon i-system" aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="14" x="2" y="3" rx="2" /><line x1="8" x2="16" y1="21" y2="21" /><line x1="12" x2="12" y1="17" y2="21" /></svg><svg class="icon i-light" aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4" /><path d="M12 2v2" /><path d="M12 20v2" /><path d="m4.93 4.93 1.41 1.41" /><path d="m17.66 17.66 1.41 1.41" /><path d="M2 12h2" /><path d="M20 12h2" /><path d="m6.34 17.66-1.41 1.41" /><path d="m19.07 4.93-1.41 1.41" /></svg><svg class="icon i-dark" aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401" /></svg></button>
+  </div>
 </header>
-<div id="banner" class="banner" hidden></div>
+<div id="banner" class="banner" role="alert" hidden></div>
 <main>
 {{body}}
 </main>
-<script src="/assets/i18n.js"></script>
-<script src="/assets/uplot.min.js"></script>
-<script src="/assets/app.js"></script>
-<script src="/assets/{{page}}.js"></script>
+<script src="/assets/i18n.js?v={{v}}"></script>
+<script src="/assets/uplot.min.js?v={{v}}"></script>
+<script src="/assets/app.js?v={{v}}"></script>
+<script src="/assets/{{page}}.js?v={{v}}"></script>
 </body>
 </html>

@@ -31,7 +31,7 @@ struct TimedOut;
 
 impl Clock {
     fn tick(&mut self) -> Result<()> {
-        if self.seen % CHECK_EVERY == 0 && Instant::now() >= self.until {
+        if self.seen.is_multiple_of(CHECK_EVERY) && Instant::now() >= self.until {
             return Err(TimedOut.into());
         }
         self.seen += 1;
@@ -64,6 +64,7 @@ pub(super) struct SearchIndex {
     stamp: SystemTime,
 }
 
+#[allow(unsafe_code)]
 fn mmap(p: &Path) -> Result<Mmap> {
     // Files are replaced by rename, never modified in place.
     Ok(unsafe { Mmap::map(&std::fs::File::open(p)?)? })
@@ -108,9 +109,7 @@ impl Matcher {
     fn score(&self, domain: &str, skeleton: &str) -> Option<f64> {
         match self.mode {
             Mode::Exact => (domain == self.q).then_some(1.0),
-            Mode::Contains => domain.contains(&self.q).then(|| {
-                self.q.len() as f64 / domain.len().max(1) as f64
-            }),
+            Mode::Contains => domain.contains(&self.q).then(|| self.q.len() as f64 / domain.len().max(1) as f64),
             Mode::Levenshtein(d) => {
                 let target = if self.bare { Self::label(domain) } else { domain };
                 Self::close(target, &self.q, d as usize)
@@ -138,12 +137,7 @@ fn hit(domain: String, score: f64, packed: u64) -> DomainHit {
     }
 }
 
-fn from_index(
-    ix: &SearchIndex,
-    m: &Matcher,
-    out: &mut HashMap<String, DomainHit>,
-    clock: &mut Clock,
-) -> Result<()> {
+fn from_index(ix: &SearchIndex, m: &Matcher, out: &mut HashMap<String, DomainHit>, clock: &mut Clock) -> Result<()> {
     let add = |d: &str, skel: &str, v: u64, out: &mut HashMap<String, DomainHit>| {
         if let Some(s) = m.score(d, skel) {
             out.insert(d.to_string(), hit(d.to_string(), s, v));
@@ -216,12 +210,7 @@ fn from_index(
 }
 
 /// Adds domains from delta files, which the FSTs do not cover yet.
-fn from_deltas(
-    data: &Path,
-    m: &Matcher,
-    out: &mut HashMap<String, DomainHit>,
-    clock: &mut Clock,
-) -> Result<()> {
+fn from_deltas(data: &Path, m: &Matcher, out: &mut HashMap<String, DomainHit>, clock: &mut Clock) -> Result<()> {
     for f in list_parts(data, "domains") {
         if f.file_name().is_some_and(|n| n.to_string_lossy().starts_with("snapshot-")) {
             continue;
@@ -265,12 +254,7 @@ impl QueryEngine {
     }
 
     /// Domains matching `q`, best first.
-    pub async fn search_domains(
-        &self,
-        q: &str,
-        mode: Mode,
-        limit: usize,
-    ) -> Result<Vec<DomainHit>, QueryError> {
+    pub async fn search_domains(&self, q: &str, mode: Mode, limit: usize) -> Result<Vec<DomainHit>, QueryError> {
         let _permit = self.limiter.acquire().await.map_err(|e| QueryError::Failed(e.to_string()))?;
         self.search_with(q, mode, limit, Instant::now() + self.timeout).await
     }
@@ -292,7 +276,13 @@ impl QueryEngine {
         self.search_with(q, mode, limit, until).await
     }
 
-    async fn search_with(&self, q: &str, mode: Mode, limit: usize, until: Instant) -> Result<Vec<DomainHit>, QueryError> {
+    async fn search_with(
+        &self,
+        q: &str,
+        mode: Mode,
+        limit: usize,
+        until: Instant,
+    ) -> Result<Vec<DomainHit>, QueryError> {
         let m = Matcher::new(q, mode);
         let mut out = HashMap::new();
         let timed = |e: anyhow::Error| match e.is::<TimedOut>() {

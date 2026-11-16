@@ -13,7 +13,10 @@ use tokio::net::{TcpListener, UdpSocket};
 #[derive(Debug, Clone)]
 pub enum MockAnswer {
     /// Addresses, optionally behind one CNAME.
-    Addrs { cname: Option<String>, addrs: Vec<IpAddr> },
+    Addrs {
+        cname: Option<String>,
+        addrs: Vec<IpAddr>,
+    },
     NxDomain,
     ServFail,
     /// Never answers.

@@ -15,7 +15,7 @@ current head and does not backfill.
 
     curl -fsSL https://raw.githubusercontent.com/overcuriousity/ctprobe/main/install.sh | sh
 
-This installs the latest build for Linux on x86_64 or aarch64 and, where systemd runs, enables and
+This installs the latest release for Linux on x86_64 or aarch64 (glibc 2.35 or newer) and, where systemd runs, enables and
 starts a `ctprobe` service. It also installs Unbound with apt, dnf or zypper and runs it for ctprobe
 alone as `ctprobe-unbound` on `127.0.0.1:5335`, leaving the system's resolver alone, and adds a
 `[dns]` section to the config if it has none. It needs root, and uses sudo if you are not root. Then open
@@ -116,6 +116,8 @@ of the day and the answers that differ from the one before.
     cargo build --release
 
 Run the tests with `cargo test --features mock`.
+
+Every merge to `main` is released as `vYYYY.M.N`; `ctprobe --version` prints it.
 
 ## License
 

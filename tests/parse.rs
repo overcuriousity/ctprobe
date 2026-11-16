@@ -17,17 +17,12 @@ const TILE: &[u8] = include_bytes!("fixtures/tile.bin");
 
 fn get_entries() -> Vec<Vec<u8>> {
     use base64::Engine;
-    let v: serde_json::Value =
-        serde_json::from_slice(include_bytes!("fixtures/get_entries.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(include_bytes!("fixtures/get_entries.json")).unwrap();
     v["entries"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|e| {
-            base64::engine::general_purpose::STANDARD
-                .decode(e["leaf_input"].as_str().unwrap())
-                .unwrap()
-        })
+        .map(|e| base64::engine::general_purpose::STANDARD.decode(e["leaf_input"].as_str().unwrap()).unwrap())
         .collect()
 }
 
@@ -75,10 +70,7 @@ fn extract_all_tile_entries() {
 #[test]
 fn precert_fields_come_from_tbs_not_pre_certificate() {
     let entries = decode_tile(TILE).unwrap();
-    let e = entries
-        .iter()
-        .find(|e| e.view.kind == EntryKind::Precert)
-        .expect("fixture has a precert");
+    let e = entries.iter().find(|e| e.view.kind == EntryKind::Precert).expect("fixture has a precert");
     assert!(e.pre_certificate.is_some());
     let p = extract(&raw(EntryKind::Precert, e.view.body)).unwrap();
     assert!(!p.serial_hex.is_empty());

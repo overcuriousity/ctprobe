@@ -148,8 +148,7 @@ fn parse_size(s: &str) -> Result<u64> {
 
 impl Config {
     pub fn load(path: &Path) -> Result<Config> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let raw: RawConfig = toml::from_str(&text).context("parsing config")?;
         let coverage_target = raw.coverage_target.unwrap_or(DEFAULT_COVERAGE_TARGET);
         if !(coverage_target > 0.0 && coverage_target <= 100.0) {
@@ -180,7 +179,12 @@ impl Config {
             dns: raw.dns.build()?,
             hot_days: raw.hot_days,
             dns_days: raw.dns_days,
-            archive_budget_bytes: raw.archive_budget.as_deref().map(parse_size).transpose().context("archive_budget")?,
+            archive_budget_bytes: raw
+                .archive_budget
+                .as_deref()
+                .map(parse_size)
+                .transpose()
+                .context("archive_budget")?,
         })
     }
 }
@@ -190,7 +194,7 @@ mod tests {
     use super::*;
     #[test]
     fn loads_example_config() {
-        let c = Config::load(std::path::Path::new("ctprobe.example.toml")).unwrap();
+        let c = Config::load(std::path::Path::new("config.example.toml")).unwrap();
         assert_eq!(c.bind.to_string(), "0.0.0.0:8080");
         assert_eq!(c.disk_budget_bytes, 4294967296);
         assert_eq!(c.tracker_max_bytes, 2147483648);
@@ -210,7 +214,8 @@ mod tests {
             std::fs::write(&p, format!("{base}{dns}")).unwrap();
             Config::load(&p).map(|c| c.dns)
         };
-        let c = load("[dns]\nresolver = \"127.0.0.1:5335\"\nmax_qps = 100\nsample_pct = 25\nstate_max = \"64MiB\"\n").unwrap();
+        let c = load("[dns]\nresolver = \"127.0.0.1:5335\"\nmax_qps = 100\nsample_pct = 25\nstate_max = \"64MiB\"\n")
+            .unwrap();
         assert_eq!(c.resolver.unwrap().to_string(), "127.0.0.1:5335");
         assert_eq!((c.max_qps, c.sample_pct, c.state_max_bytes), (100, 25.0, 64 << 20));
         assert_eq!(load("[dns]\nresolver = \"::1\"\n").unwrap().resolver.unwrap().to_string(), "[::1]:53");

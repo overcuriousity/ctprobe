@@ -1,7 +1,7 @@
 'use strict';
 const date = (ms) => new Date(ms).toISOString().replace('.000Z', 'Z');
 const addrs = (...lists) => lists.flatMap((l) => l || []).join(' ');
-const raw = (v) => h('span', { style: 'white-space:normal;word-break:break-all', 'data-raw': '' }, v);
+const raw = (v) => h('span', { class: 'raw', 'data-raw': '' }, v);
 
 // One row per name: what DNS said when the certificate was seen, when an
 // address first appeared, and how that compares with the answer before.
@@ -88,10 +88,10 @@ async function dnsSection(host, c) {
     ];
     const dns = h('div', {}, h('div', { class: 'empty' }, 'Loading…'));
     clear(host).append(h('table', {}, h('tbody', {}, ...rows.map(([k, v]) => h('tr', {}, h('th', {}, k), h('td', { class: 'wrap' }, v))))),
-      h('h2', { style: 'margin-top:16px' }, 'DNS', info('dnscert')),
+      h('h2', { class: 'line strong' }, 'DNS', info('dnscert')),
       h('p', { class: 'sub' }, 'A and AAAA of each name, from the probes made for this certificate'),
       dns,
-      h('h2', { style: 'margin-top:16px' }, 'Original'),
+      h('h2', { class: 'line strong' }, 'Original'),
       h('p', { class: 'sub' }, c.is_precert ? 'Fetched from the log. Precertificates are stored as the TBSCertificate.' : 'Fetched from the log.'),
       h('pre', { 'data-raw': '' }, c.pem));
     dnsSection(dns, c);

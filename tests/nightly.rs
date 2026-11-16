@@ -93,9 +93,7 @@ fn read(dir: &Path, table: &str) -> Vec<RecordBatch> {
 }
 
 fn sum_col(b: &[RecordBatch], c: &str) -> i64 {
-    b.iter()
-        .map(|x| x.column_by_name(c).unwrap().as_primitive::<Int64Type>().iter().flatten().sum::<i64>())
-        .sum()
+    b.iter().map(|x| x.column_by_name(c).unwrap().as_primitive::<Int64Type>().iter().flatten().sum::<i64>()).sum()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -113,7 +111,15 @@ async fn rollup_sums_match_certs() {
     assert_eq!(sum_col(&f, "new_domains"), 3);
     let buckets: Vec<String> = r
         .iter()
-        .flat_map(|b| b.column_by_name("validity_bucket").unwrap().as_string::<i32>().iter().flatten().map(str::to_string).collect::<Vec<_>>())
+        .flat_map(|b| {
+            b.column_by_name("validity_bucket")
+                .unwrap()
+                .as_string::<i32>()
+                .iter()
+                .flatten()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
         .collect();
     assert!(buckets.contains(&"<=7d".to_string()));
     assert!(buckets.contains(&"<=100d".to_string()));
@@ -139,9 +145,11 @@ async fn coverage_greedy_order() {
     nightly::run_nightly(&cfg(d.path()), day()).await.unwrap();
     let c = read(d.path(), "daily_coverage");
     let b = arrow::compute::concat_batches(&c[0].schema(), &c).unwrap();
-    let logs: Vec<i32> = b.column_by_name("log_id").unwrap().as_primitive::<arrow::datatypes::Int32Type>().iter().flatten().collect();
+    let logs: Vec<i32> =
+        b.column_by_name("log_id").unwrap().as_primitive::<arrow::datatypes::Int32Type>().iter().flatten().collect();
     assert_eq!(logs, [0, 1]); // Log 2 adds nothing and is not listed.
-    let pct: Vec<f64> = b.column_by_name("cumulative_pct").unwrap().as_primitive::<Float64Type>().iter().flatten().collect();
+    let pct: Vec<f64> =
+        b.column_by_name("cumulative_pct").unwrap().as_primitive::<Float64Type>().iter().flatten().collect();
     assert_eq!(pct, [75.0, 100.0]);
 }
 
@@ -196,7 +204,8 @@ async fn domains_merge_updates_first_last_count() {
     let b = &t[0];
     let names: Vec<_> = b.column_by_name("domain").unwrap().as_string::<i32>().iter().flatten().collect();
     assert_eq!(names, ["alpha.org", "beta.net", "zeta.com"]);
-    let counts: Vec<i64> = b.column_by_name("cert_count").unwrap().as_primitive::<Int64Type>().iter().flatten().collect();
+    let counts: Vec<i64> =
+        b.column_by_name("cert_count").unwrap().as_primitive::<Int64Type>().iter().flatten().collect();
     assert_eq!(counts, [3, 1, 1]);
     assert!(d.path().join("search/domains.fst").exists());
     assert!(d.path().join("search/skeleton.fst").exists());
@@ -290,7 +299,13 @@ async fn dns_day_compacts_sorted_by_domain_and_still_answers_lookups() {
         cert_seen_at_ms: at,
         attempt: 0,
         renewal: "new",
-        lookup: Lookup { status: Status::Resolved, v4: vec!["192.0.2.1".parse().unwrap()], v6: vec![], cnames: vec![], ttl: Some(60) },
+        lookup: Lookup {
+            status: Status::Resolved,
+            v4: vec!["192.0.2.1".parse().unwrap()],
+            v6: vec![],
+            cnames: vec![],
+            ttl: Some(60),
+        },
         latency_ms: 5,
         last_miss_ms: None,
         prev: None,
@@ -310,13 +325,25 @@ async fn dns_day_compacts_sorted_by_domain_and_still_answers_lookups() {
     assert!(parts[0].ends_with("daily.parquet"));
     let domains: Vec<String> = read(dir.path(), "dns")
         .iter()
-        .flat_map(|b| b.column_by_name("reg_domain").unwrap().as_string::<i32>().iter().map(|d| d.unwrap().to_string()).collect::<Vec<_>>())
+        .flat_map(|b| {
+            b.column_by_name("reg_domain")
+                .unwrap()
+                .as_string::<i32>()
+                .iter()
+                .map(|d| d.unwrap().to_string())
+                .collect::<Vec<_>>()
+        })
         .collect();
     assert_eq!(domains, ["alpha.org", "alpha.org", "zeta.com"]);
 
     let engine = ctprobe::query::QueryEngine::open(dir.path()).unwrap();
     let r = engine
-        .internal(format!("SELECT name FROM dns WHERE cert_hash = CAST('{}' AS BIGINT UNSIGNED)", u64::MAX), 10, None, None)
+        .internal(
+            format!("SELECT name FROM dns WHERE cert_hash = CAST('{}' AS BIGINT UNSIGNED)", u64::MAX),
+            10,
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(r.rows, vec![vec![serde_json::json!("www.zeta.com")]]);

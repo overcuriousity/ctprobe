@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
 
-# Runs in order, so an older commit can never overwrite a newer build.
+# Runs in order, so two merges can never compute the same version.
 concurrency:
   group: release
   cancel-in-progress: false
@@ -12,12 +12,29 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   test:
     uses: ./.github/workflows/ci.yml
 
-  build:
+  version:
     needs: test
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      # CalVer YYYY.M.N: N counts the releases of the month.
+      - id: v
+        run: |
+          month=$(date -u +%Y.%-m)
+          last=$(git ls-remote --tags "https://github.com/$GITHUB_REPOSITORY" "refs/tags/v$month.*" |
+            sed -n "s|.*refs/tags/v$month\.\([0-9][0-9]*\)$|\1|p" | sort -n | tail -n 1)
+          echo "version=$month.$(( ${last:-0} + 1 ))" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
     strategy:
       matrix:
         include:
@@ -26,42 +43,46 @@ jobs:
           - arch: aarch64
             runner: ubuntu-22.04-arm
     runs-on: ${{ matrix.runner }}
+    env:
+      CTPROBE_VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: sudo apt-get update && sudo apt-get install -y cmake pkg-config
       - run: cargo build --release --locked
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-about
+      - run: sh scripts/licenses.sh
+      # The installer depends on these names.
       - name: Package
         run: |
           name=ctprobe-linux-${{ matrix.arch }}.tar.gz
-          tar -czf "$name" -C target/release ctprobe -C "$PWD" deploy
+          tar -czf "$name" -C target/release ctprobe -C "$PWD" deploy THIRD-PARTY-LICENSES
           sha256sum "$name" > "$name.sha256"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.arch }}
           path: ctprobe-linux-*
+          if-no-files-found: error
 
   publish:
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
+      TAG: v${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           merge-multiple: true
-      # One rolling release. The installer reads it through /releases/latest/.
-      - name: Publish
-        run: |
-          notes="Built from ${GITHUB_SHA}."
-          if gh release view latest >/dev/null 2>&1; then
-            gh api -X PATCH "repos/$GH_REPO/git/refs/tags/latest" -f sha="$GITHUB_SHA" -F force=true
-            gh release upload latest ctprobe-linux-* --clobber
-            gh release edit latest --notes "$notes" --latest
-          else
-            gh release create latest ctprobe-linux-* --target "$GITHUB_SHA" --title "Latest build" --notes "$notes" --latest
-          fi
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ctprobe-linux-*.tar.gz
+      # Creates the tag. The installer reads this release through /releases/latest/.
+      - run: gh release create "$TAG" ctprobe-linux-* --target "$GITHUB_SHA" --title "$TAG" --generate-notes --latest

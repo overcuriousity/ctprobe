@@ -290,7 +290,8 @@ fn two_domain_cert() -> CertRow {
 #[tokio::test(flavor = "multi_thread")]
 async fn matches_a_non_primary_domain() {
     for archive in [vec![], vec![D]] {
-        let a = app_with(Setup { certs: vec![two_domain_cert()], archive: archive.clone(), ..Default::default() }).await;
+        let a =
+            app_with(Setup { certs: vec![two_domain_cert()], archive: archive.clone(), ..Default::default() }).await;
         let rs = rows(&a, "/api/v1/certs?domain=two.org").await;
         assert_eq!(rs.len(), 1, "archive {archive:?}: {rs:?}");
         assert_eq!(rs[0]["reg_domain"], "two.org");
@@ -473,13 +474,16 @@ async fn paging_returns_every_row_once() {
     assert_eq!(pages, 3, "{all:?}");
     assert_eq!(seen.len(), 7, "{seen:?}");
     assert_eq!(seen.iter().collect::<HashSet<_>>().len(), 7, "{seen:?}");
-    let order: Vec<(i64, i64, i64)> =
-        all.iter().map(|r| (r["seen_at"].as_i64().unwrap(), r["log_id"].as_i64().unwrap(), r["entry_index"].as_i64().unwrap())).collect();
+    let order: Vec<(i64, i64, i64)> = all
+        .iter()
+        .map(|r| (r["seen_at"].as_i64().unwrap(), r["log_id"].as_i64().unwrap(), r["entry_index"].as_i64().unwrap()))
+        .collect();
     let mut sorted = order.clone();
     sorted.sort_by(|x, y| y.cmp(x));
     assert_eq!(order, sorted);
     // The certificate covering both domains: bone.com before one.com.
-    let three: Vec<&str> = all.iter().filter(|r| r["entry_index"] == 3).map(|r| r["reg_domain"].as_str().unwrap()).collect();
+    let three: Vec<&str> =
+        all.iter().filter(|r| r["entry_index"] == 3).map(|r| r["reg_domain"].as_str().unwrap()).collect();
     assert_eq!(three, vec!["bone.com", "one.com"]);
 }
 
@@ -517,7 +521,8 @@ async fn scope_errors() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn timeout_without_rows_is_504() {
-    let a = app_with(Setup { certs: vec![two_domain_cert()], timeout: Some(Duration::ZERO), ..Default::default() }).await;
+    let a =
+        app_with(Setup { certs: vec![two_domain_cert()], timeout: Some(Duration::ZERO), ..Default::default() }).await;
     let (s, _, b) = get(&a, "/api/v1/certs?domain=one.com").await;
     assert_eq!(s, 504, "{b}");
     assert_eq!(code(&b), "timeout");
@@ -715,7 +720,8 @@ async fn dns_paging_returns_every_row_once() {
     let a = app_with(probed(dns, vec![D])).await;
     let all = dns_rows(&page(&a, "/api/v1/domain/example.com?limit=100").await);
     assert_eq!(all.len(), 6, "{all:?}");
-    let order: Vec<(i64, String)> = all.iter().map(|r| (r["probed_at"].as_i64().unwrap(), r["name"].as_str().unwrap().into())).collect();
+    let order: Vec<(i64, String)> =
+        all.iter().map(|r| (r["probed_at"].as_i64().unwrap(), r["name"].as_str().unwrap().into())).collect();
     let mut sorted = order.clone();
     sorted.sort_by(|x, y| y.0.cmp(&x.0).then(x.1.cmp(&y.1)));
     assert_eq!(order, sorted);

@@ -1,8 +1,8 @@
 use super::buckets::{san_case, size_case, validity_case};
 use super::QueryEngine;
 use crate::store::{
-    certs_schema, daily_coverage_schema, daily_stages_schema, daily_top_schema, day_string,
-    dns_minute_schema, dns_schema, domains_schema, list_parts, register_files, rollup_daily_schema, rollup_minute_schema, session,
+    certs_schema, daily_coverage_schema, daily_stages_schema, daily_top_schema, day_string, dns_minute_schema,
+    dns_schema, domains_schema, list_parts, register_files, rollup_daily_schema, rollup_minute_schema, session,
     sightings_schema,
 };
 use anyhow::Result;
@@ -203,8 +203,7 @@ const NEWEST: &str = "seen_at DESC, log_id DESC, entry_index DESC";
 /// Accepts exactly one read-only query. DataFusion's own SQL also plans DDL,
 /// `COPY` and `SET`, so the check happens on the parsed statement.
 pub fn check_sql(q: &str) -> Result<(), QueryError> {
-    let stmts = Parser::parse_sql(&GenericDialect {}, q)
-        .map_err(|e| QueryError::NotAllowed(e.to_string()))?;
+    let stmts = Parser::parse_sql(&GenericDialect {}, q).map_err(|e| QueryError::NotAllowed(e.to_string()))?;
     match stmts.as_slice() {
         [Statement::Query(_)] => Ok(()),
         _ => Err(QueryError::NotAllowed("not a single query".into())),
@@ -225,9 +224,7 @@ pub(super) fn to_result(batches: &[RecordBatch], schema: SchemaRef, limit: usize
     let rows = objects
         .into_iter()
         .take(limit)
-        .map(|mut o| {
-            columns.iter().map(|c| o.remove(c).unwrap_or(serde_json::Value::Null)).collect()
-        })
+        .map(|mut o| columns.iter().map(|c| o.remove(c).unwrap_or(serde_json::Value::Null)).collect())
         .collect();
     Ok(QueryResult { columns, rows, truncated })
 }

@@ -42,7 +42,10 @@ fn text(v: Option<String>) -> Option<String> {
     v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
-pub(super) async fn certs(State(s): State<AppState>, Params(p): Params<CertsParams>) -> Result<Json<TierPage>, ApiError> {
+pub(super) async fn certs(
+    State(s): State<AppState>,
+    Params(p): Params<CertsParams>,
+) -> Result<Json<TierPage>, ApiError> {
     // One time limit for the whole request, search included.
     let deadline = Instant::now() + s.engine.timeout();
     let scope = match (p.domain.as_deref(), p.q.as_deref()) {

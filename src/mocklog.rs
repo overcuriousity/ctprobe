@@ -181,10 +181,7 @@ impl MockLog {
             data_status: None,
         }));
         let st = state.clone();
-        Mock::given(any())
-            .respond_with(move |r: &Request| respond(&st, r))
-            .mount(&server)
-            .await;
+        Mock::given(any()).respond_with(move |r: &Request| respond(&st, r)).mount(&server).await;
         MockLog { server, state }
     }
 
@@ -247,10 +244,7 @@ impl Default for TestCa {
 impl TestCa {
     pub fn final_cert(&self, serial: u64, names: &[&str]) -> MockEntry {
         let key = rcgen::KeyPair::generate().unwrap();
-        let mut p = rcgen::CertificateParams::new(
-            names.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-        )
-        .unwrap();
+        let mut p = rcgen::CertificateParams::new(names.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap();
         p.serial_number = Some(rcgen::SerialNumber::from(serial.max(1)));
         if let Some(n) = names.first() {
             p.distinguished_name.push(rcgen::DnType::CommonName, *n);

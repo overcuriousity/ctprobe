@@ -42,11 +42,8 @@ impl Gate {
 
     pub fn enter(&self, archive: bool) -> Result<Permits, ApiError> {
         let all = self.all.clone().try_acquire_owned().map_err(|_| ApiError::Busy)?;
-        let archive = if archive {
-            Some(self.archive.clone().try_acquire_owned().map_err(|_| ApiError::Busy)?)
-        } else {
-            None
-        };
+        let archive =
+            if archive { Some(self.archive.clone().try_acquire_owned().map_err(|_| ApiError::Busy)?) } else { None };
         Ok(Permits { _all: all, _archive: archive })
     }
 }

@@ -2,7 +2,8 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "ctprobe", about = "Certificate Transparency measurement service")]
+// Release builds are stamped by CI; the version in Cargo.toml is a placeholder.
+#[command(name = "ctprobe", version = option_env!("CTPROBE_VERSION").unwrap_or("dev"), about = "Certificate Transparency measurement service")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -31,8 +32,7 @@ enum Cmd {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "ctprobe=info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "ctprobe=info".into()),
         )
         .init();
     let cli = Cli::parse();
