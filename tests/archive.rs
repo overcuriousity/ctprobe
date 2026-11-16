@@ -160,7 +160,34 @@ async fn budget_full_writes_nothing() {
     std::fs::write(&other, b"existing").unwrap();
     assert_eq!(archive::certs(d.path(), DAY, 1).await.unwrap(), Outcome::BudgetFull);
     assert!(!archive_file(d.path(), "certs", DAY).exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn budget_full_sets_no_marker_and_stays_pending() {
+    let d = tempfile::tempdir().unwrap();
+    seed_certs(d.path(), vec![row("1", "a.com", D, "LE", 90, RenewalClass::New)]);
+    let other = archive_file(d.path(), "certs", "2024-10-03");
+    std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+    std::fs::write(&other, b"existing").unwrap();
+    let mut c = cfg(d.path());
+    c.archive_budget_bytes = Some(1);
+    nightly::run_nightly(&c, day()).await.unwrap();
     assert!(!d.path().join("nightly").join(format!("{DAY}.archive")).exists());
+    assert!(!archive_file(d.path(), "certs", DAY).exists());
+    let today = NaiveDate::from_ymd_opt(2024, 10, 5).unwrap();
+    assert_eq!(nightly::pending_days(d.path(), today, true), vec![day()]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn existing_file_is_done_even_over_budget() {
+    let d = tempfile::tempdir().unwrap();
+    seed_certs(d.path(), vec![row("1", "a.com", D, "LE", 90, RenewalClass::New), row("2", "b.com", D, "LE", 90, RenewalClass::New)]);
+    archive::certs(d.path(), DAY, u64::MAX).await.unwrap();
+    let f = archive_file(d.path(), "certs", DAY);
+    let before = std::fs::read(&f).unwrap();
+    let o = archive::certs(d.path(), DAY, 1).await.unwrap();
+    assert_eq!(o, Outcome::Written { rows: 2, bytes: before.len() as u64 });
+    assert_eq!(std::fs::read(&f).unwrap(), before);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -173,6 +200,7 @@ async fn rerun_after_crash_is_clean() {
     let a = archive::certs(d.path(), DAY, u64::MAX).await.unwrap();
     let b = archive::certs(d.path(), DAY, u64::MAX).await.unwrap();
     assert!(matches!(a, Outcome::Written { rows: 2, .. }) && matches!(b, Outcome::Written { rows: 2, .. }), "{a:?} {b:?}");
+    assert_eq!(a, b);
     assert_eq!(list_archive(d.path(), "certs"), vec![f.clone()]);
     assert_eq!(read_file(&f).num_rows(), 2);
     assert!(!f.with_extension("parquet.tmp").exists());

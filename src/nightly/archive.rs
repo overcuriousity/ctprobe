@@ -14,6 +14,7 @@ use arrow::array::{
 use arrow::datatypes::{Int32Type, Int64Type, TimestampMillisecondType};
 use futures::StreamExt;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::file::metadata::ParquetMetaDataReader;
 use parquet::arrow::{ArrowWriter, ProjectionMask};
 use std::path::Path;
 use std::sync::Arc;
@@ -146,6 +147,13 @@ fn expand(files: &[std::path::PathBuf], out: &Path) -> Result<u64> {
 }
 
 pub async fn certs(data: &Path, day: &str, budget: u64) -> Result<Outcome> {
+    // The rename makes a file at the final path complete, so the day is done.
+    let dest = archive_file(data, "certs", day);
+    if dest.exists() {
+        let meta = ParquetMetaDataReader::new().parse_and_finish(&std::fs::File::open(&dest)?)?;
+        let rows = meta.file_metadata().num_rows() as u64;
+        return Ok(Outcome::Written { rows, bytes: std::fs::metadata(&dest)?.len() });
+    }
     if archive_size(data) >= budget {
         return Ok(Outcome::BudgetFull);
     }
@@ -162,7 +170,6 @@ pub async fn certs(data: &Path, day: &str, budget: u64) -> Result<Outcome> {
         return Ok(Outcome::Empty);
     }
 
-    let dest = archive_file(data, "certs", day);
     std::fs::create_dir_all(dest.parent().unwrap())?;
     let tmp = dest.with_extension("parquet.tmp");
     let schema = archive_certs_schema();
