@@ -86,3 +86,7 @@ required-features = ["mock"]
 [[test]]
 name = "contract"
 required-features = ["mock"]
+
+[[test]]
+name = "v1"
+required-features = ["mock"]
