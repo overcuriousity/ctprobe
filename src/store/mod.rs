@@ -13,6 +13,9 @@ use chrono::{DateTime, Utc};
 use datafusion::datasource::empty::EmptyTable;
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
+use parquet::file::metadata::ParquetMetaDataReader;
+use parquet::file::statistics::Statistics;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -88,6 +91,45 @@ pub fn list_archive(data: &Path, table: &str) -> Vec<PathBuf> {
         .filter(|p| p.extension().is_some_and(|x| x == "parquet"))
         .collect();
     out.sort();
+    out
+}
+
+fn epoch_day(d: chrono::NaiveDate) -> i64 {
+    d.signed_duration_since(chrono::NaiveDate::default()).num_days()
+}
+
+/// The range of a millisecond timestamp column in a Parquet footer.
+fn footer_range(p: &Path, column: &str) -> Option<(i64, i64)> {
+    let meta = ParquetMetaDataReader::new().parse_and_finish(&std::fs::File::open(p).ok()?).ok()?;
+    let col = meta.file_metadata().schema_descr().columns().iter().position(|c| c.name() == column)?;
+    let mut range: Option<(i64, i64)> = None;
+    for rg in meta.row_groups() {
+        let Some(Statistics::Int64(s)) = rg.column(col).statistics() else { return None };
+        let (lo, hi) = (*s.min_opt()?, *s.max_opt()?);
+        range = Some(range.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))));
+    }
+    range
+}
+
+/// Archive files of `table` by the days (since the epoch) they hold.
+/// `<YYYY-MM-DD>.parquet` holds that day; a file of any other name is placed
+/// by the range of the timestamp column `ts` in its footer.
+pub fn archive_days(data: &Path, table: &str, ts: &str) -> BTreeMap<i64, Vec<PathBuf>> {
+    const MS_PER_DAY: i64 = 86_400_000;
+    let mut out: BTreeMap<i64, Vec<PathBuf>> = BTreeMap::new();
+    for p in list_archive(data, table) {
+        let stem = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let days = match chrono::NaiveDate::parse_from_str(&stem, "%Y-%m-%d") {
+            Ok(d) => epoch_day(d)..=epoch_day(d),
+            Err(_) => match footer_range(&p, ts) {
+                Some((lo, hi)) => lo.div_euclid(MS_PER_DAY)..=hi.div_euclid(MS_PER_DAY),
+                None => continue,
+            },
+        };
+        for d in days {
+            out.entry(d).or_default().push(p.clone());
+        }
+    }
     out
 }
 
