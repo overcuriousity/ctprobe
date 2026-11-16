@@ -1,13 +1,10 @@
 use super::{MEMORY, PARTITIONS};
 use crate::store::{
-    certs_schema, daily_coverage_schema, daily_stages_schema, daily_top_schema, list_day,
-    register_files, rollup_daily_schema, session, sightings_schema, write_batch,
+    certs_schema, daily_coverage_schema, daily_stages_schema, daily_top_schema, list_day, register_files,
+    rollup_daily_schema, session, sightings_schema, write_batch,
 };
 use anyhow::{Context, Result};
-use arrow::array::{
-    ArrayRef, AsArray, Date32Array, Float64Array, Int32Array, Int64Array, RecordBatch,
-    StringArray,
-};
+use arrow::array::{ArrayRef, AsArray, Date32Array, Float64Array, Int32Array, Int64Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Int32Type, Int64Type, SchemaRef, UInt64Type};
 use chrono::{Datelike, NaiveDate};
 use datafusion::prelude::SessionContext;
@@ -147,13 +144,7 @@ fn coverage(data: &Path, day: &str, date_days: i32) -> Result<()> {
     let mut covered = 0i64;
     for (bit, added) in order {
         covered += added as i64;
-        rows.push((
-            rows.len() as i32 + 1,
-            ids[bit],
-            added as i64,
-            covered,
-            covered as f64 * 100.0 / total as f64,
-        ));
+        rows.push((rows.len() as i32 + 1, ids[bit], added as i64, covered, covered as f64 * 100.0 / total as f64));
     }
     let n = rows.len();
     let cols: Vec<ArrayRef> = vec![

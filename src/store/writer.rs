@@ -1,6 +1,5 @@
 use super::{
-    certs_schema, day_string, dns_minute_schema, dns_schema, domains_schema, rollup_minute_schema,
-    sightings_schema,
+    certs_schema, day_string, dns_minute_schema, dns_schema, domains_schema, rollup_minute_schema, sightings_schema,
 };
 use crate::dns::{DnsMinuteRow, DnsRow};
 use crate::names;
@@ -324,13 +323,9 @@ fn certs_batch(rows: &[CertRow]) -> Result<RecordBatch> {
             listc(&|r| &r.parsed.names),
             listc(&|r| &r.reg_domains),
             s(&|r| r.primary_domain.clone()),
-            s(&|r| {
-                r.primary_domain.as_deref().and_then(psl::suffix_str).map(str::to_string)
-            }),
+            s(&|r| r.primary_domain.as_deref().and_then(psl::suffix_str).map(str::to_string)),
             i32c(&|r| Some(r.parsed.san_count as i32)),
-            i32c(&|r| {
-                Some(r.parsed.names.iter().map(|n| names::depth(n)).max().unwrap_or(0) as i32)
-            }),
+            i32c(&|r| Some(r.parsed.names.iter().map(|n| names::depth(n)).max().unwrap_or(0) as i32)),
             s(&|r| Some(r.parsed.key_type.clone())),
             i32c(&|r| Some(r.parsed.key_bits as i32)),
             s(&|r| Some(r.parsed.sig_type.clone())),
@@ -427,7 +422,6 @@ fn domains_batch(rows: &[(String, DomainDelta)]) -> Result<RecordBatch> {
         ],
     )
 }
-
 
 fn dns_batch(rows: &[DnsRow]) -> Result<RecordBatch> {
     let ts = |f: &dyn Fn(&DnsRow) -> Option<i64>| -> ArrayRef {

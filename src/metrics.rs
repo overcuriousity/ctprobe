@@ -3,9 +3,7 @@
 use crate::coverage::{CoverageReport, Step};
 use crate::fetch::LogStats;
 use crate::history::History;
-use crate::loghealth::{
-    behind_of, classify, verdict, HealthInput, LogState, Verdict, VerdictInput, WindowSummary,
-};
+use crate::loghealth::{behind_of, classify, verdict, HealthInput, LogState, Verdict, VerdictInput, WindowSummary};
 use crate::registry::LogInfo;
 use crate::types::{CertRow, LogId};
 use serde::Serialize;

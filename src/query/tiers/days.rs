@@ -47,7 +47,13 @@ pub(super) fn objects(r: QueryResult) -> Vec<Map<String, Value>> {
 }
 
 /// A row from the top-level values of `src`.
-fn row(tier: &str, reg: &str, names: Vec<Value>, src: &Map<String, Value>, detail: Option<Map<String, Value>>) -> Value {
+fn row(
+    tier: &str,
+    reg: &str,
+    names: Vec<Value>,
+    src: &Map<String, Value>,
+    detail: Option<Map<String, Value>>,
+) -> Value {
     let mut o = Map::new();
     o.insert("tier".into(), tier.into());
     o.insert("reg_domain".into(), reg.into());
@@ -111,7 +117,10 @@ impl QueryEngine {
         if !found.is_empty() && is_hot {
             let list = |v: BTreeSet<String>| v.into_iter().collect::<Vec<_>>().join(", ");
             let primary = |o: &Map<String, Value>| {
-                o.get("primary_domain").and_then(Value::as_str).or(o.get("reg_domain").and_then(Value::as_str)).map(quote)
+                o.get("primary_domain")
+                    .and_then(Value::as_str)
+                    .or(o.get("reg_domain").and_then(Value::as_str))
+                    .map(quote)
             };
             let pairs: BTreeSet<String> = found.iter().map(|o| quote(&pair(key(o)))).collect();
             // Exact pairs; `primary_domain` and `entry_index` let files and
@@ -156,7 +165,8 @@ impl QueryEngine {
         n: usize,
         t: Duration,
     ) -> Result<Got<CertCursor>, QueryError> {
-        let mut conds = scope.conditions(day, format!("array_has_any(reg_domains, make_array({}))", scope.list()), false);
+        let mut conds =
+            scope.conditions(day, format!("array_has_any(reg_domains, make_array({}))", scope.list()), false);
         match start {
             Some(Start::Cursor(c)) => conds.push(c.sql("TRUE")),
             Some(Start::After(c)) => conds.push(c.sql("FALSE")),
@@ -171,7 +181,13 @@ impl QueryEngine {
         let found = objects(self.run_within(sql, n, Some(lo), Some(hi), t).await?);
         let wanted: HashSet<&str> = scope.domains.iter().map(String::as_str).collect();
         let strs = |o: &Map<String, Value>, k: &str| -> Vec<String> {
-            o.get(k).and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect()
+            o.get(k)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
         };
         let mut rows = Vec::new();
         for o in &found {
@@ -187,7 +203,12 @@ impl QueryEngine {
         }
         let next = found.last().map(|o| {
             let n = |k: &str| o.get(k).and_then(Value::as_i64).unwrap_or_default();
-            CertCursor { seen_at_ms: n("seen_at"), log_id: n("log_id") as i32, entry_index: n("entry_index"), reg_domain: String::new() }
+            CertCursor {
+                seen_at_ms: n("seen_at"),
+                log_id: n("log_id") as i32,
+                entry_index: n("entry_index"),
+                reg_domain: String::new(),
+            }
         });
         Ok(Got { rows, returned: found.len(), next, cut: false })
     }

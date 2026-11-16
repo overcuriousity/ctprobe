@@ -1,7 +1,7 @@
 use arrow::array::{Array, AsArray, RecordBatch};
 use arrow::datatypes::{Int32Type, UInt64Type};
-use ctprobe::store::{list_parts, Writer, MINUTE_GLOBAL_LOG};
 use ctprobe::store::RollupMinuteRow;
+use ctprobe::store::{list_parts, Writer, MINUTE_GLOBAL_LOG};
 use ctprobe::types::{CertRow, ParsedCert, RenewalClass, Sighting};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::path::Path;
@@ -81,10 +81,8 @@ fn flush_splits_at_utc_midnight() {
     w.flush(1).unwrap();
     w.publish(1).unwrap();
     let parts = list_parts(d.path(), "certs");
-    let days: Vec<String> = parts
-        .iter()
-        .map(|p| p.parent().unwrap().file_name().unwrap().to_string_lossy().into_owned())
-        .collect();
+    let days: Vec<String> =
+        parts.iter().map(|p| p.parent().unwrap().file_name().unwrap().to_string_lossy().into_owned()).collect();
     assert_eq!(days, ["day=2024-10-04", "day=2024-10-05"]);
 }
 
@@ -152,7 +150,13 @@ fn domains_delta_aggregates_per_flush() {
 fn rollup_minute_global_row_keeps_process_columns() {
     let d = tempfile::tempdir().unwrap();
     let mut w = Writer::open(d.path(), 0).unwrap();
-    w.push_rollup(RollupMinuteRow { minute_ms: D1, log: MINUTE_GLOBAL_LOG, entries: 5, tracker_names: Some(77), ..Default::default() });
+    w.push_rollup(RollupMinuteRow {
+        minute_ms: D1,
+        log: MINUTE_GLOBAL_LOG,
+        entries: 5,
+        tracker_names: Some(77),
+        ..Default::default()
+    });
     w.push_rollup(RollupMinuteRow { minute_ms: D1, log: 1, entries: 3, ..Default::default() });
     w.flush(1).unwrap();
     w.publish(1).unwrap();

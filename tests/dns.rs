@@ -102,12 +102,25 @@ impl Run {
 #[tokio::test]
 async fn client_reads_answers_and_failures() {
     let m = MockDns::start().await;
-    m.set("www.example.com", MockAnswer::Addrs { cname: Some("edge.cdn.example".into()), addrs: vec!["192.0.2.1".parse().unwrap(), "2001:db8::1".parse().unwrap()] });
+    m.set(
+        "www.example.com",
+        MockAnswer::Addrs {
+            cname: Some("edge.cdn.example".into()),
+            addrs: vec!["192.0.2.1".parse().unwrap(), "2001:db8::1".parse().unwrap()],
+        },
+    );
     m.set("broken.example.com", MockAnswer::ServFail);
     m.set("slow.example.com", MockAnswer::Silent);
     let n = |s: &str| query_name(s).unwrap();
     let (a, _) = query(m.addr(), &n("www.example.com"), RecordType::A, T, 1).await;
-    assert_eq!(a, Reply::Answer { addrs: vec!["192.0.2.1".parse().unwrap()], cnames: vec!["edge.cdn.example".into()], ttl: Some(60) });
+    assert_eq!(
+        a,
+        Reply::Answer {
+            addrs: vec!["192.0.2.1".parse().unwrap()],
+            cnames: vec!["edge.cdn.example".into()],
+            ttl: Some(60)
+        }
+    );
     let (aaaa, _) = query(m.addr(), &n("www.example.com"), RecordType::AAAA, T, 1).await;
     assert!(matches!(aaaa, Reply::Answer { ref addrs, .. } if addrs.len() == 1 && addrs[0].is_ipv6()));
     assert_eq!(query(m.addr(), &n("nothing.example.com"), RecordType::A, T, 1).await.0, Reply::NxDomain);
@@ -182,7 +195,13 @@ async fn wildcards_are_asked_as_written_and_for_the_name_they_cover() {
 }
 
 fn resolved(v4: &[&str]) -> Lookup {
-    Lookup { status: Status::Resolved, v4: v4.iter().map(|a| a.parse().unwrap()).collect(), v6: vec![], cnames: vec![], ttl: None }
+    Lookup {
+        status: Status::Resolved,
+        v4: v4.iter().map(|a| a.parse().unwrap()).collect(),
+        v6: vec![],
+        cnames: vec![],
+        ttl: None,
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -202,7 +221,10 @@ async fn reports_ip_changes_and_keeps_answers_across_restarts() {
     run.link.submit(&cert(1, &["moved.example.com", "same.example.com"], RenewalClass::Name));
     let r = run.until("first", |r, _| r.names.first.probes == 2).await;
     let e = &r.names.earlier_day;
-    assert_eq!((e.compared, e.changed, e.v4_compared, e.v4_changed, e.v4_replaced, e.v4_replaced_known), (1, 1, 1, 1, 1, 1));
+    assert_eq!(
+        (e.compared, e.changed, e.v4_compared, e.v4_changed, e.v4_replaced, e.v4_replaced_known),
+        (1, 1, 1, 1, 1, 1)
+    );
     let moved = run.row("moved.example.com", 0);
     let (old, change) = moved.prev.unwrap();
     assert_eq!((change.days, change.v4_changed), (30, true));

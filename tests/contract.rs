@@ -6,8 +6,8 @@ use ctprobe::query::QueryEngine;
 use ctprobe::registry::{LogKind, LogSpec};
 use ctprobe::web;
 use futures::StreamExt;
-use std::sync::Arc;
 use serde_json::{json, Value};
+use std::sync::Arc;
 use std::time::Duration;
 
 struct App {
@@ -126,7 +126,6 @@ async fn get_json(u: String) -> Value {
     reqwest::get(u).await.unwrap().json().await.unwrap()
 }
 
-
 /// Replaces every scalar by its type name, keeps object keys, and reduces an
 /// array to the shape of its first element (`[]` when it is empty).
 fn shape(v: &Value) -> Value {
@@ -214,11 +213,28 @@ fn hit() -> Value {
 /// The cells of one certificate row of `/api/certs`, in column order.
 fn cert_row() -> Value {
     json!([
-        "string", "string", "string", "string", "string", "string", "string", "number", ["string"],
-        "string", "number", "string", "bool", "string",
+        "string",
+        "string",
+        "string",
+        "string",
+        "string",
+        "string",
+        "string",
+        "number",
+        ["string"],
+        "string",
+        "number",
+        "string",
+        "bool",
+        "string",
         // days_since_seen is null for a certificate that is new when it is seen.
         "null",
-        "number", "number", "string", "number", "string", "bool"
+        "number",
+        "number",
+        "string",
+        "number",
+        "string",
+        "bool"
     ])
 }
 
@@ -380,7 +396,8 @@ async fn contract_schema() {
 #[tokio::test(flavor = "multi_thread")]
 async fn contract_sql() {
     let a = app(vec![], true).await;
-    ok(&a, "/api/sql?q=SELECT%201%20AS%20x", json!({"columns": ["string"], "rows": [["number"]], "truncated": "bool"})).await;
+    ok(&a, "/api/sql?q=SELECT%201%20AS%20x", json!({"columns": ["string"], "rows": [["number"]], "truncated": "bool"}))
+        .await;
     let v = fetch(&a, "/api/sql?q=SELECT%201%20AS%20x,%20%27y%27%20AS%20z", 200, "application/json").await;
     assert_eq!(cells(&v["rows"][0]), json!(["number", "string"]), "{v}");
     assert_eq!(csv_header(&a, "/api/sql?q=SELECT%201%20AS%20x&format=csv").await, "x");
@@ -530,7 +547,13 @@ async fn contract_stream() {
     };
     let (text, _) = tokio::join!(reader, release);
     let events = sse_events(&text);
-    let first = |name: &str| events.iter().find(|(n, _)| n == name).map(|(_, d)| d.clone()).unwrap_or_else(|| panic!("no {name} event in {text}"));
+    let first = |name: &str| {
+        events
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, d)| d.clone())
+            .unwrap_or_else(|| panic!("no {name} event in {text}"))
+    };
     // The first snapshot can come before the log's tree size is known.
     let mut snapshot = first("snapshot");
     variable(&mut snapshot, "/behind_total", &["number", "null"]);

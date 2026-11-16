@@ -19,11 +19,7 @@ pub fn normalize(name: &str) -> Option<String> {
     if host.is_empty() {
         return None;
     }
-    let host = if host.is_ascii() {
-        host.to_ascii_lowercase()
-    } else {
-        idna::domain_to_ascii(host).ok()?
-    };
+    let host = if host.is_ascii() { host.to_ascii_lowercase() } else { idna::domain_to_ascii(host).ok()? };
     if host.len() > MAX_NAME || !host.split('.').all(valid_label) {
         return None;
     }

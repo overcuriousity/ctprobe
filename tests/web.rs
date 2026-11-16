@@ -118,11 +118,7 @@ fn csv_neutralises_formulas() {
     };
     assert_eq!(web::csv::to_csv(&r), "a,b,c\n'=cmd(),\"x,\"\"y\"\"\",p.com q.com\n");
     for bad in ["+1", "-1", "@x", "\tx", "\rx"] {
-        let r = QueryResult {
-            columns: vec!["a".into()],
-            rows: vec![vec![serde_json::json!(bad)]],
-            truncated: false,
-        };
+        let r = QueryResult { columns: vec!["a".into()], rows: vec![vec![serde_json::json!(bad)]], truncated: false };
         assert!(web::csv::to_csv(&r).contains(&format!("'{}", bad.trim_end())) || bad == "\rx");
     }
 }
@@ -249,7 +245,8 @@ async fn every_metric_has_a_valid_query() {
             assert_eq!(code, 200, "{m} {bucket}: {}", r.text().await.unwrap());
         }
     }
-    let v: serde_json::Value = reqwest::get(format!("{}/api/trends/issuers", a.base)).await.unwrap().json().await.unwrap();
+    let v: serde_json::Value =
+        reqwest::get(format!("{}/api/trends/issuers", a.base)).await.unwrap().json().await.unwrap();
     assert_eq!(v["rows"][0][0], "Test CA");
     assert_eq!(v["rows"][0][1], 3);
     a.pipe.shutdown().await.unwrap();
@@ -267,11 +264,23 @@ async fn unknown_metric_is_404() {
 async fn search_page_flow() {
     let a = app(certs(&["needle.example.com"]), false).await;
     wait_rows(&a, 1).await;
-    let hits: serde_json::Value = reqwest::get(format!("{}/api/search?q=example.com&mode=levenshtein&distance=1", a.base)).await.unwrap().json().await.unwrap();
+    let hits: serde_json::Value =
+        reqwest::get(format!("{}/api/search?q=example.com&mode=levenshtein&distance=1", a.base))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
     assert_eq!(hits[0]["domain"], "example.com");
-    let c: serde_json::Value = reqwest::get(format!("{}/api/certs?domain=example.com", a.base)).await.unwrap().json().await.unwrap();
+    let c: serde_json::Value =
+        reqwest::get(format!("{}/api/certs?domain=example.com", a.base)).await.unwrap().json().await.unwrap();
     assert_eq!(c["rows"].as_array().unwrap().len(), 1);
-    let csv = reqwest::get(format!("{}/api/certs?domain=example.com&format=csv", a.base)).await.unwrap().text().await.unwrap();
+    let csv = reqwest::get(format!("{}/api/certs?domain=example.com&format=csv", a.base))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
     assert!(csv.starts_with("seen_at,cn,"), "{csv}");
     a.pipe.shutdown().await.unwrap();
 }
@@ -293,7 +302,17 @@ async fn cert_detail_fetches_from_mock_log() {
 #[tokio::test(flavor = "multi_thread")]
 async fn empty_store_renders() {
     let a = app(vec![], false).await;
-    for p in ["/", "/trends", "/search", "/sql", "/sizing", "/dns", "/domain?d=example.com", "/cert?log=0&index=0", "/api/schema"] {
+    for p in [
+        "/",
+        "/trends",
+        "/search",
+        "/sql",
+        "/sizing",
+        "/dns",
+        "/domain?d=example.com",
+        "/cert?log=0&index=0",
+        "/api/schema",
+    ] {
         assert_eq!(reqwest::get(format!("{}{p}", a.base)).await.unwrap().status(), 200, "{p}");
     }
     for m in web::trends::METRICS {
@@ -551,14 +570,19 @@ async fn each_new_filter_applies() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sort_orders_across_all_rows_not_a_page() {
-    let a = app(certs(&["e.example.com", "c.example.com", "a.example.com", "d.example.com", "b.example.com"]), false).await;
+    let a =
+        app(certs(&["e.example.com", "c.example.com", "a.example.com", "d.example.com", "b.example.com"]), false).await;
     wait_rows(&a, 5).await;
     let cn = |q: &'static str| {
         let base = a.base.clone();
         async move {
             let v = get_json(format!("{base}/api/certs?domain=example.com&sort=cn&dir=asc&limit=2&{q}")).await;
             let i = v["columns"].as_array().unwrap().iter().position(|c| c == "cn").unwrap();
-            (v["rows"].as_array().unwrap().iter().map(|r| r[i].as_str().unwrap().to_string()).collect::<Vec<_>>(), v["truncated"].as_bool().unwrap(), v["count"].clone())
+            (
+                v["rows"].as_array().unwrap().iter().map(|r| r[i].as_str().unwrap().to_string()).collect::<Vec<_>>(),
+                v["truncated"].as_bool().unwrap(),
+                v["count"].clone(),
+            )
         }
     };
     let (rows, more, count) = cn("offset=0").await;
@@ -633,7 +657,14 @@ async fn csv_follows_filters() {
 async fn trends_click_path_finds_the_bar_rows() {
     let a = app(certs(&["a.example.com", "b.example.org", "c.example.org"]), false).await;
     wait_rows(&a, 3).await;
-    for (metric, param) in [("issuers", "issuer"), ("tlds", "tld"), ("keys", "key_type"), ("validity", "validity"), ("san_dist", "san"), ("der_size", "size")] {
+    for (metric, param) in [
+        ("issuers", "issuer"),
+        ("tlds", "tld"),
+        ("keys", "key_type"),
+        ("validity", "validity"),
+        ("san_dist", "san"),
+        ("der_size", "size"),
+    ] {
         let v = get_json(format!("{}/api/trends/{metric}?hours=6&bucket=minute", a.base)).await;
         for row in v["rows"].as_array().unwrap() {
             let (key, bar) = (row[0].as_str().unwrap(), row[1].as_u64().unwrap());
@@ -688,7 +719,13 @@ async fn pages_have_their_new_sections() {
     let sizing = page("/sizing").await;
     assert!(sizing.contains("id=\"keeping\"") && sizing.contains("id=\"coverage\""));
     let js = page("/assets/app.js").await;
-    for f in ["function sortTable", "function fmtCount", "function logTable", "function keepingCard", "function coverageSummary"] {
+    for f in [
+        "function sortTable",
+        "function fmtCount",
+        "function logTable",
+        "function keepingCard",
+        "function coverageSummary",
+    ] {
         assert!(js.contains(f), "{f}");
     }
     a.pipe.shutdown().await.unwrap();

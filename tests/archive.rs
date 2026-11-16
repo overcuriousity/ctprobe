@@ -1,7 +1,10 @@
 use arrow::array::{AsArray, RecordBatch};
 use chrono::NaiveDate;
 use ctprobe::config::Config;
-use ctprobe::nightly::{self, archive::{self, Outcome}};
+use ctprobe::nightly::{
+    self,
+    archive::{self, Outcome},
+};
 use ctprobe::store::{archive_file, list_archive, Writer};
 use ctprobe::types::{CertRow, ParsedCert, RenewalClass};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -67,7 +70,6 @@ fn row(serial: &str, domain: &str, seen: i64, issuer: &str, days: i64, renewal: 
     }
 }
 
-
 fn seed_certs(dir: &Path, rows: Vec<CertRow>) {
     let mut w = Writer::open(dir, 0).unwrap();
     for r in rows {
@@ -100,7 +102,10 @@ const DAY: &str = "2024-10-04";
 #[tokio::test(flavor = "multi_thread")]
 async fn one_row_per_registered_domain() {
     let d = tempfile::tempdir().unwrap();
-    seed_certs(d.path(), vec![multi("1", &["a.one.com", "*.one.com", "b.two.org"], &["one.com", "two.org"], Some("one.com"), D)]);
+    seed_certs(
+        d.path(),
+        vec![multi("1", &["a.one.com", "*.one.com", "b.two.org"], &["one.com", "two.org"], Some("one.com"), D)],
+    );
     let o = archive::certs(d.path(), DAY, u64::MAX).await.unwrap();
     assert!(matches!(o, Outcome::Written { rows: 2, .. }), "{o:?}");
     let b = read_file(&archive_file(d.path(), "certs", DAY));
@@ -108,9 +113,8 @@ async fn one_row_per_registered_domain() {
     assert_eq!(strings(&b, "reg_domain"), vec![Some("one.com".into()), Some("two.org".into())]);
     assert_eq!(strings(&b, "primary_domain"), vec![None, Some("one.com".into())]);
     let names = b.column_by_name("names").unwrap().as_list::<i32>();
-    let row = |i: usize| -> Vec<String> {
-        names.value(i).as_string::<i32>().iter().flatten().map(str::to_string).collect()
-    };
+    let row =
+        |i: usize| -> Vec<String> { names.value(i).as_string::<i32>().iter().flatten().map(str::to_string).collect() };
     assert_eq!(row(0), vec!["*.one.com", "a.one.com"]);
     assert_eq!(row(1), vec!["b.two.org"]);
     assert_eq!(b.schema(), ctprobe::store::archive_certs_schema());
@@ -208,7 +212,10 @@ fn days_left_counts_both_archives_per_day() {
 #[tokio::test(flavor = "multi_thread")]
 async fn existing_file_is_done_even_over_budget() {
     let d = tempfile::tempdir().unwrap();
-    seed_certs(d.path(), vec![row("1", "a.com", D, "LE", 90, RenewalClass::New), row("2", "b.com", D, "LE", 90, RenewalClass::New)]);
+    seed_certs(
+        d.path(),
+        vec![row("1", "a.com", D, "LE", 90, RenewalClass::New), row("2", "b.com", D, "LE", 90, RenewalClass::New)],
+    );
     archive::certs(d.path(), DAY, u64::MAX).await.unwrap();
     let f = archive_file(d.path(), "certs", DAY);
     let before = std::fs::read(&f).unwrap();
@@ -220,13 +227,19 @@ async fn existing_file_is_done_even_over_budget() {
 #[tokio::test(flavor = "multi_thread")]
 async fn rerun_after_crash_is_clean() {
     let d = tempfile::tempdir().unwrap();
-    seed_certs(d.path(), vec![row("1", "a.com", D, "LE", 90, RenewalClass::New), row("2", "b.com", D + 1, "LE", 90, RenewalClass::New)]);
+    seed_certs(
+        d.path(),
+        vec![row("1", "a.com", D, "LE", 90, RenewalClass::New), row("2", "b.com", D + 1, "LE", 90, RenewalClass::New)],
+    );
     let f = archive_file(d.path(), "certs", DAY);
     std::fs::create_dir_all(f.parent().unwrap()).unwrap();
     std::fs::write(f.with_extension("parquet.tmp"), b"junk").unwrap();
     let a = archive::certs(d.path(), DAY, u64::MAX).await.unwrap();
     let b = archive::certs(d.path(), DAY, u64::MAX).await.unwrap();
-    assert!(matches!(a, Outcome::Written { rows: 2, .. }) && matches!(b, Outcome::Written { rows: 2, .. }), "{a:?} {b:?}");
+    assert!(
+        matches!(a, Outcome::Written { rows: 2, .. }) && matches!(b, Outcome::Written { rows: 2, .. }),
+        "{a:?} {b:?}"
+    );
     assert_eq!(a, b);
     assert_eq!(list_archive(d.path(), "certs"), vec![f.clone()]);
     assert_eq!(read_file(&f).num_rows(), 2);
@@ -337,8 +350,15 @@ mod dns_archive {
         let mut r = ok("www.a.com", 1, &["1.1.1.1"]);
         let l = Last::of(&r.lookup, 0);
         let diff = Diff {
-            days: 1, changed: false, status_changed: false, cname_changed: false, network_changed: false,
-            v4_changed: false, v6_changed: false, v4: None, v6: None,
+            days: 1,
+            changed: false,
+            status_changed: false,
+            cname_changed: false,
+            network_changed: false,
+            v4_changed: false,
+            v6_changed: false,
+            v4: None,
+            v6: None,
         };
         r.prev = Some((l, diff));
         let (_d, b) = archived(vec![r]).await;
@@ -372,11 +392,9 @@ mod dns_archive {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn address_order_is_not_a_change() {
-        let (_d, b) = archived(vec![
-            ok("www.a.com", 1, &["1.1.1.1", "2.2.2.2"]),
-            ok("www.a.com", 2, &["2.2.2.2", "1.1.1.1"]),
-        ])
-        .await;
+        let (_d, b) =
+            archived(vec![ok("www.a.com", 1, &["1.1.1.1", "2.2.2.2"]), ok("www.a.com", 2, &["2.2.2.2", "1.1.1.1"])])
+                .await;
         assert_eq!(b.num_rows(), 1);
     }
 
@@ -429,7 +447,13 @@ mod dns_archive {
         let key: Vec<(String, String, i64)> = strings(&b, "reg_domain")
             .into_iter()
             .zip(strings(&b, "name"))
-            .zip(b.column_by_name("probed_at").unwrap().as_primitive::<arrow::datatypes::TimestampMillisecondType>().values().iter())
+            .zip(
+                b.column_by_name("probed_at")
+                    .unwrap()
+                    .as_primitive::<arrow::datatypes::TimestampMillisecondType>()
+                    .values()
+                    .iter(),
+            )
             .map(|((r, n), t)| (r.unwrap(), n.unwrap(), *t))
             .collect();
         assert!(key.windows(2).all(|w| w[0] <= w[1]), "{key:?}");

@@ -7,8 +7,8 @@ mod sql;
 mod tiers;
 
 pub use search::{DomainHit, Mode};
-pub use tiers::*;
 pub use sql::{quote, CertFilter, CertPage, CertScope, DnsFilter, QueryError, QueryResult, SortKey, MAX_OFFSET};
+pub use tiers::*;
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};

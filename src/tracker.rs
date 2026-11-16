@@ -136,14 +136,7 @@ impl Tracker {
         replay_wal(&wal_path, &mut tables, committed_epoch).context("replaying tracker WAL")?;
         let mut wal = OpenOptions::new().read(true).write(true).open(&wal_path)?;
         wal.seek(SeekFrom::End(0))?;
-        let mut t = Tracker {
-            dir: dir.to_path_buf(),
-            max_bytes,
-            tables,
-            pending: Vec::new(),
-            pending_records: 0,
-            wal,
-        };
+        let mut t = Tracker { dir: dir.to_path_buf(), max_bytes, tables, pending: Vec::new(), pending_records: 0, wal };
         t.evict();
         Ok(t)
     }
@@ -186,7 +179,11 @@ impl Tracker {
         let mut kept = Table::with_capacity_and_hasher(capacity, Default::default());
         kept.extend(t.drain().filter(|(k, d)| {
             // All of one day means nothing is older, so an arbitrary half goes.
-            if by_day { u16::from_le_bytes(*d) > cutoff } else { k[0] & 1 == 0 }
+            if by_day {
+                u16::from_le_bytes(*d) > cutoff
+            } else {
+                k[0] & 1 == 0
+            }
         }));
         *t = kept;
     }
@@ -247,8 +244,7 @@ impl Tracker {
             self.put(SETS, h, today);
         }
 
-        let mut reg_domains: Vec<String> =
-            p.names.iter().filter_map(|n| names::registered_domain(n)).collect();
+        let mut reg_domains: Vec<String> = p.names.iter().filter_map(|n| names::registered_domain(n)).collect();
         reg_domains.sort_unstable();
         reg_domains.dedup();
         let mut new_domains = 0;
@@ -336,8 +332,7 @@ impl Tracker {
 
     /// Drops expired dedup entries. Run daily.
     pub fn expire_dedup(&mut self, today: u16) {
-        self.tables[DEDUP as usize]
-            .retain(|_, d| today.saturating_sub(u16::from_le_bytes(*d)) <= DEDUP_DAYS);
+        self.tables[DEDUP as usize].retain(|_, d| today.saturating_sub(u16::from_le_bytes(*d)) <= DEDUP_DAYS);
         self.tables[DEDUP as usize].shrink_to_fit();
     }
 

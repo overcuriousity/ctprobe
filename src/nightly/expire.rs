@@ -134,7 +134,5 @@ pub fn enforce(data: &Path, r: &Retention, today: NaiveDate) -> Result<Option<St
         }
         size = size.saturating_sub(remove_day(data, d)?);
     }
-    Ok((size > budget).then(|| {
-        format!("disk budget of {budget} bytes cannot be met; data uses {size} bytes")
-    }))
+    Ok((size > budget).then(|| format!("disk budget of {budget} bytes cannot be met; data uses {size} bytes")))
 }

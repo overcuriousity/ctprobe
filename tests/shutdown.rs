@@ -10,8 +10,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 async fn sigterm_commits_before_exit() {
     let d = tempfile::tempdir().unwrap();
     let ca = TestCa::default();
-    let es: Vec<MockEntry> =
-        (0..300).map(|i| ca.final_cert(i + 1, &[&format!("h{i}.example.com")])).collect();
+    let es: Vec<MockEntry> = (0..300).map(|i| ca.final_cert(i + 1, &[&format!("h{i}.example.com")])).collect();
     let log = MockLog::start(MockOpts::rfc6962(0).with_entries(es)).await;
     log.set_tree_size(100);
 
@@ -19,10 +18,7 @@ async fn sigterm_commits_before_exit() {
     let body = serde_json::json!({ "operators": [{ "name": "op", "logs": [{
         "description": "Mock", "log_id": "bW9jaw==", "url": log.url(), "state": { "usable": {} }
     }]}]});
-    Mock::given(path("/list.json"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(body))
-        .mount(&list)
-        .await;
+    Mock::given(path("/list.json")).respond_with(ResponseTemplate::new(200).set_body_json(body)).mount(&list).await;
 
     let cfg = d.path().join("c.toml");
     std::fs::write(

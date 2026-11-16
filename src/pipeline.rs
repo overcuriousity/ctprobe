@@ -224,15 +224,17 @@ impl Pipeline {
         let live = Arc::new(LiveState::default());
         live.started_at_ms.store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
         *live.coverage_target.write().unwrap() = cfg.coverage_target;
-        *live.history.lock().unwrap() =
-            History::load(&cfg.data_dir.join(HISTORY_FILE), chrono::Utc::now().timestamp());
+        *live.history.lock().unwrap() = History::load(&cfg.data_dir.join(HISTORY_FILE), chrono::Utc::now().timestamp());
         let (feed, _) = broadcast::channel(1024);
         let (tx, rx) = mpsc::channel::<Batch>(CHANNEL_BATCHES);
         let (stop, stop_rx) = watch::channel(false);
         let tasks = Arc::new(Mutex::new(Vec::new()));
         let (dns_link, dns_thread) = if cfg.dns.enabled() {
             let (l, t) = dns::start(cfg.dns.clone(), opts.dns.clone(), &cfg.data_dir, stop.subscribe())?;
-            tracing::info!("probing names via the DNS resolver at {}", cfg.dns.resolver.map(|r| r.to_string()).unwrap_or_default());
+            tracing::info!(
+                "probing names via the DNS resolver at {}",
+                cfg.dns.resolver.map(|r| r.to_string()).unwrap_or_default()
+            );
             (Some(l), Some(t))
         } else {
             (None, None)
@@ -291,9 +293,7 @@ impl Pipeline {
 
         let coverage_thread = {
             let (l, d, every, s) = (live.clone(), cfg.data_dir.clone(), opts.coverage_every, stop.subscribe());
-            std::thread::Builder::new()
-                .name("ctprobe-coverage".into())
-                .spawn(move || coverage_loop(l, d, every, s))?
+            std::thread::Builder::new().name("ctprobe-coverage".into()).spawn(move || coverage_loop(l, d, every, s))?
         };
 
         let mode = Arc::new(AtomicU8::new(RUN));
@@ -324,9 +324,7 @@ impl Pipeline {
             dns: dns_link,
             _fleet: fleet,
         };
-        let thread = std::thread::Builder::new()
-            .name("ctprobe-pipeline".into())
-            .spawn(move || ctx.run())?;
+        let thread = std::thread::Builder::new().name("ctprobe-pipeline".into()).spawn(move || ctx.run())?;
 
         Ok(Pipeline {
             handle: PipelineHandle { live, feed, registry, dns: dns_stats },
@@ -613,9 +611,7 @@ impl Worker {
             self.writer.push_cert(row);
         }
         if bad > 0 {
-            if let Some((_, st)) =
-                self.live.logs.read().unwrap().iter().find(|(l, _)| l.id == batch.log)
-            {
+            if let Some((_, st)) = self.live.logs.read().unwrap().iter().find(|(l, _)| l.id == batch.log) {
                 st.malformed.fetch_add(bad, Ordering::Relaxed);
             }
         }
@@ -738,10 +734,7 @@ impl Worker {
         let (mut raw, mut backlog, mut limited, mut healthy) = (0i64, 0i64, 0i64, 0i64);
         for (id, s) in logs {
             let a = self.agg.entry(id).or_default();
-            let behind = s
-                .tree_size
-                .load(Ordering::Relaxed)
-                .saturating_sub(s.position.load(Ordering::Relaxed)) as i64;
+            let behind = s.tree_size.load(Ordering::Relaxed).saturating_sub(s.position.load(Ordering::Relaxed)) as i64;
             if s.http_429.load(Ordering::Relaxed) > a.http_429 {
                 a.limited_at = Some(Instant::now());
             }
@@ -759,9 +752,7 @@ impl Worker {
                 *prev = c;
                 d as i64
             };
-            let q = |h: &Histogram<u64>, v: f64| {
-                (!h.is_empty()).then(|| h.value_at_quantile(v) as i64)
-            };
+            let q = |h: &Histogram<u64>, v: f64| (!h.is_empty()).then(|| h.value_at_quantile(v) as i64);
             let row = RollupMinuteRow {
                 minute_ms,
                 log: id,

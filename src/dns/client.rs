@@ -14,7 +14,11 @@ const MAX_UDP: usize = 4096;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reply {
     /// NOERROR, with the records of the asked type and the CNAMEs on the way.
-    Answer { addrs: Vec<IpAddr>, cnames: Vec<String>, ttl: Option<u32> },
+    Answer {
+        addrs: Vec<IpAddr>,
+        cnames: Vec<String>,
+        ttl: Option<u32>,
+    },
     NxDomain,
     /// Any other response code, such as SERVFAIL or REFUSED.
     Rcode(u16),
@@ -49,9 +53,7 @@ fn matches(req: &Message, resp: &Message) -> bool {
     resp.metadata.id == req.metadata.id
         && resp.metadata.message_type == MessageType::Response
         && match (req.queries.first(), resp.queries.first()) {
-            (Some(a), Some(b)) => {
-                a.query_type() == b.query_type() && host(a.name()) == host(b.name())
-            }
+            (Some(a), Some(b)) => a.query_type() == b.query_type() && host(a.name()) == host(b.name()),
             _ => false,
         }
 }

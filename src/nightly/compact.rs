@@ -1,8 +1,8 @@
 use super::{expire, MEMORY, PARTITIONS};
 use crate::metrics::dir_size;
 use crate::store::{
-    certs_schema, dns_minute_schema, dns_schema, list_day, register_files, rollup_minute_schema,
-    session, sightings_schema,
+    certs_schema, dns_minute_schema, dns_schema, list_day, register_files, rollup_minute_schema, session,
+    sightings_schema,
 };
 use anyhow::{Context, Result};
 use arrow::datatypes::SchemaRef;
@@ -73,7 +73,15 @@ pub async fn run(data: &Path, day: &str, r: &expire::Retention) -> Result<()> {
     if free_bytes(data).is_some_and(|f| f < need) {
         expire::enforce(data, r, Utc::now().date_naive())?;
     }
-    compact_table(data, "certs", certs_schema(), day, "ORDER BY primary_domain NULLS LAST, seen_at", &[("primary_domain", BLOOM_NDV)]).await?;
+    compact_table(
+        data,
+        "certs",
+        certs_schema(),
+        day,
+        "ORDER BY primary_domain NULLS LAST, seen_at",
+        &[("primary_domain", BLOOM_NDV)],
+    )
+    .await?;
     compact_table(data, "sightings", sightings_schema(), day, "", &[]).await?;
     compact_table(data, "rollup_minute", rollup_minute_schema(), day, "", &[]).await?;
     // The Domain page reads by registered domain, the Certificate page by hash.

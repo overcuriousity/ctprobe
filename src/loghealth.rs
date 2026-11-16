@@ -136,11 +136,7 @@ pub fn classify(i: &HealthInput) -> LogState {
         return LogState::RateLimited;
     }
     if behind {
-        return if w.fetched_per_sec > w.published_per_sec {
-            LogState::CatchingUp
-        } else {
-            LogState::FallingBehind
-        };
+        return if w.fetched_per_sec > w.published_per_sec { LogState::CatchingUp } else { LogState::FallingBehind };
     }
     if i.tree_changed_ms > 0 && i.now_ms - i.tree_changed_ms >= NOT_ADVANCING_MS {
         return LogState::NotAdvancing;
@@ -265,7 +261,13 @@ mod tests {
     }
 
     fn falling() -> VerdictInput {
-        VerdictInput { published_per_sec: 1000.0, fetched_per_sec: 500.0, backlog: 500_000, backlog_change: 450_000, ..verdict_input() }
+        VerdictInput {
+            published_per_sec: 1000.0,
+            fetched_per_sec: 500.0,
+            backlog: 500_000,
+            backlog_change: 450_000,
+            ..verdict_input()
+        }
     }
 
     #[test]
@@ -314,19 +316,34 @@ mod tests {
 
     #[test]
     fn verdict_holding_steady_within_five_percent() {
-        let v = verdict(&VerdictInput { fetched_per_sec: 96.0, backlog: 90_000, backlog_change: 90_000, ..verdict_input() });
+        let v = verdict(&VerdictInput {
+            fetched_per_sec: 96.0,
+            backlog: 90_000,
+            backlog_change: 90_000,
+            ..verdict_input()
+        });
         assert_eq!(v.status, Keeping::HoldingSteady);
     }
 
     #[test]
     fn verdict_holding_steady_when_backlog_barely_moves() {
-        let v = verdict(&VerdictInput { published_per_sec: 100.0, fetched_per_sec: 50.0, backlog_change: 5999, ..verdict_input() });
+        let v = verdict(&VerdictInput {
+            published_per_sec: 100.0,
+            fetched_per_sec: 50.0,
+            backlog_change: 5999,
+            ..verdict_input()
+        });
         assert_eq!(v.status, Keeping::HoldingSteady);
     }
 
     #[test]
     fn verdict_eta_only_when_catching_up() {
-        let up = verdict(&VerdictInput { fetched_per_sec: 200.0, backlog: 10_000, backlog_change: -90_000, ..verdict_input() });
+        let up = verdict(&VerdictInput {
+            fetched_per_sec: 200.0,
+            backlog: 10_000,
+            backlog_change: -90_000,
+            ..verdict_input()
+        });
         assert_eq!(up.status, Keeping::CatchingUp);
         assert_eq!(up.eta_secs, Some(100));
         assert_eq!(verdict(&falling()).eta_secs, None);
@@ -349,7 +366,12 @@ mod tests {
             last_contact_ms: NOW,
             tree_changed_ms: NOW,
             data_fail_since_ms: 0,
-            window: WindowSummary { seconds: 900.0, fetched_per_sec: 10.0, published_per_sec: 10.0, ..Default::default() },
+            window: WindowSummary {
+                seconds: 900.0,
+                fetched_per_sec: 10.0,
+                published_per_sec: 10.0,
+                ..Default::default()
+            },
         }
     }
 

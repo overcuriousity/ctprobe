@@ -39,7 +39,8 @@ pub(super) async fn domain(
         Some(c) => Some(DnsCursor::decode(c).ok_or_else(|| ApiError::BadRequest("malformed cursor".into()))?),
     };
     let _permits = s.v1.enter(s.engine.has_dns_archive())?;
-    let hit = s.engine.search_domains_until(&reg, Mode::Exact, 1, deadline).await?.into_iter().find(|h| h.domain == reg);
+    let hit =
+        s.engine.search_domains_until(&reg, Mode::Exact, 1, deadline).await?.into_iter().find(|h| h.domain == reg);
     // With the summary in hand, a walk that finds nothing in time still answers,
     // with a cursor to try again from.
     let bound = Bound::dns(hit.as_ref());

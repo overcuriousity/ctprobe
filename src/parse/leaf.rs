@@ -64,9 +64,7 @@ fn read_entry<'a>(r: &mut Reader<'a>) -> Result<TimestampedEntryView<'a>, ParseE
     Ok(TimestampedEntryView { timestamp_ms, kind, body, extensions })
 }
 
-pub fn decode_timestamped_entry(
-    data: &[u8],
-) -> Result<(TimestampedEntryView<'_>, usize), ParseError> {
+pub fn decode_timestamped_entry(data: &[u8]) -> Result<(TimestampedEntryView<'_>, usize), ParseError> {
     let mut r = Reader::new(data);
     let v = read_entry(&mut r)?;
     Ok((v, r.pos))

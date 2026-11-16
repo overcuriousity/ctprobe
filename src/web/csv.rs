@@ -14,9 +14,7 @@ fn field(v: &Value) -> String {
     match v {
         Value::Null => String::new(),
         Value::String(s) => neutralise(s),
-        Value::Array(a) => {
-            neutralise(&a.iter().map(field).collect::<Vec<_>>().join(" "))
-        }
+        Value::Array(a) => neutralise(&a.iter().map(field).collect::<Vec<_>>().join(" ")),
         other => other.to_string(),
     }
 }

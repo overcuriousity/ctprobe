@@ -12,15 +12,15 @@ use crate::store::has_archive;
 use base64::Engine;
 use days::Start;
 pub use dns::DnsCursor;
-pub use walk::Bound;
 use serde::Serialize;
 use serde_json::Value;
 use std::cmp::Reverse;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use walk::{DayFetch, Days, Got, Left};
+pub use walk::Bound;
 #[cfg(test)]
 use walk::Counting;
+use walk::{DayFetch, Days, Got, Left};
 
 const BASE64: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
 const WILDCARD_RE: &str = r"'(^| )\*\.'";
@@ -80,7 +80,12 @@ impl CertCursor {
     /// A position after every row of `day` and before every row of the day
     /// before: its last millisecond with the highest log and index.
     fn after_day(day: i64) -> CertCursor {
-        CertCursor { seen_at_ms: day * MS_PER_DAY - 1, log_id: i32::MAX, entry_index: i64::MAX, reg_domain: String::new() }
+        CertCursor {
+            seen_at_ms: day * MS_PER_DAY - 1,
+            log_id: i32::MAX,
+            entry_index: i64::MAX,
+            reg_domain: String::new(),
+        }
     }
 
     /// Rows after this one in page order. `tail` decides rows of the same
@@ -198,7 +203,14 @@ impl<'a> Scope<'a> {
 
     /// The days the certificate walk lists.
     fn days<'b>(&self, bound: &'b Bound) -> Days<'b> {
-        Days { table: "certs", ts: "seen_at", from: self.f.from_ms, to: self.f.to_ms, bound, skip: self.domains.is_empty() }
+        Days {
+            table: "certs",
+            ts: "seen_at",
+            from: self.f.from_ms,
+            to: self.f.to_ms,
+            bound,
+            skip: self.domains.is_empty(),
+        }
     }
 }
 
@@ -453,7 +465,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let d = 20_000;
         let mut w = Writer::open(dir.path(), 0).unwrap();
-        for (i, t) in [d * MS_PER_DAY, (d + 1) * MS_PER_DAY - 1, (d + 1) * MS_PER_DAY, (d + 2) * MS_PER_DAY - 1].into_iter().enumerate() {
+        for (i, t) in [d * MS_PER_DAY, (d + 1) * MS_PER_DAY - 1, (d + 1) * MS_PER_DAY, (d + 2) * MS_PER_DAY - 1]
+            .into_iter()
+            .enumerate()
+        {
             w.push_cert(cert(i as u64, t));
         }
         w.flush(1).unwrap();
@@ -532,7 +547,9 @@ mod tests {
         w.push_cert(cert(1, d * MS_PER_DAY + 5));
         w.flush(1).unwrap();
         w.publish(1).unwrap();
-        crate::nightly::run_nightly(&cfg(dir.path()), chrono::NaiveDate::from_ymd_opt(2024, 10, 4).unwrap()).await.unwrap();
+        crate::nightly::run_nightly(&cfg(dir.path()), chrono::NaiveDate::from_ymd_opt(2024, 10, 4).unwrap())
+            .await
+            .unwrap();
         junk_archive(dir.path(), d - 800..d);
         junk_archive(dir.path(), d + 1..d + 30);
         let mut w = Writer::open(dir.path(), 0).unwrap();

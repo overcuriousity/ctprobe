@@ -61,8 +61,7 @@ impl Rfc6962Backend {
         let url = format!("{}/ct/v1/get-entries?start={start}&end={end}", self.base);
         let resp = check(self.client.get(url).send().await?)?;
         let body = resp.bytes().await?;
-        let parsed: Entries =
-            serde_json::from_slice(&body).map_err(|e| FetchError::Other(e.to_string()))?;
+        let parsed: Entries = serde_json::from_slice(&body).map_err(|e| FetchError::Other(e.to_string()))?;
         let mut out = Range {
             entries: Vec::with_capacity(parsed.entries.len()),
             count: parsed.entries.len() as u64,

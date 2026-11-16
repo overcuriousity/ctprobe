@@ -27,12 +27,7 @@ fn from_tbs(tbs: &TbsCertificate<'_>) -> Result<ParsedCert, ParseError> {
         Ok(PublicKey::EC(k)) => ("ecdsa".to_string(), k.key_size() as u32),
         _ => (tbs.subject_pki.algorithm.algorithm.to_id_string(), 0),
     };
-    let subject_cn = tbs
-        .subject
-        .iter_common_name()
-        .next()
-        .and_then(|a| a.as_str().ok())
-        .map(str::to_string);
+    let subject_cn = tbs.subject.iter_common_name().next().and_then(|a| a.as_str().ok()).map(str::to_string);
     let mut names: Vec<String> = Vec::new();
     let mut san_count = 0u32;
     let san = tbs.subject_alternative_name().map_err(|e| ParseError::X509(e.to_string()))?;
@@ -47,25 +42,12 @@ fn from_tbs(tbs: &TbsCertificate<'_>) -> Result<ParsedCert, ParseError> {
     if let Some(cn) = &subject_cn {
         names.push(cn.clone());
     }
-    let mut names: Vec<String> =
-        names.iter().filter_map(|n| crate::names::normalize(n)).collect();
+    let mut names: Vec<String> = names.iter().filter_map(|n| crate::names::normalize(n)).collect();
     names.sort_unstable();
     names.dedup();
     Ok(ParsedCert {
-        issuer_cn: tbs
-            .issuer
-            .iter_common_name()
-            .next()
-            .and_then(|a| a.as_str().ok())
-            .unwrap_or_default()
-            .to_string(),
-        issuer_org: tbs
-            .issuer
-            .iter_organization()
-            .next()
-            .and_then(|a| a.as_str().ok())
-            .unwrap_or_default()
-            .to_string(),
+        issuer_cn: tbs.issuer.iter_common_name().next().and_then(|a| a.as_str().ok()).unwrap_or_default().to_string(),
+        issuer_org: tbs.issuer.iter_organization().next().and_then(|a| a.as_str().ok()).unwrap_or_default().to_string(),
         issuer_der: tbs.issuer.as_raw().to_vec(),
         serial_hex: {
             // DER adds a leading zero to keep the integer positive.

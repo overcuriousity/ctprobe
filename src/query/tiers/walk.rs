@@ -169,7 +169,8 @@ impl QueryEngine {
             self.list_days(days.table, days.ts, days.from, days.to, t).await?
         };
         let in_range = |d: &i64| {
-            days.from.is_none_or(|t| *d >= t.div_euclid(MS_PER_DAY)) && days.to.is_none_or(|t| *d <= t.div_euclid(MS_PER_DAY))
+            days.from.is_none_or(|t| *d >= t.div_euclid(MS_PER_DAY))
+                && days.to.is_none_or(|t| *d <= t.div_euclid(MS_PER_DAY))
         };
         let mut list: Vec<i64> = listing
             .hot

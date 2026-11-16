@@ -248,11 +248,15 @@ async fn minute_files_from_before_the_backlog_columns_still_read() {
         Field::new("log_id", DataType::Int32, false),
         Field::new("entries", DataType::Int64, false),
     ]));
-    let b = RecordBatch::try_new(schema, vec![
-        Arc::new(TimestampMillisecondArray::from(vec![D])),
-        Arc::new(Int32Array::from(vec![1])),
-        Arc::new(Int64Array::from(vec![5])),
-    ]).unwrap();
+    let b = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(TimestampMillisecondArray::from(vec![D])),
+            Arc::new(Int32Array::from(vec![1])),
+            Arc::new(Int64Array::from(vec![5])),
+        ],
+    )
+    .unwrap();
     let f = d.path().join("rollup_minute/day=2024-10-04/part-old.parquet");
     ctprobe::store::write_batch(&f, &b, None).unwrap();
     let e = QueryEngine::open(d.path()).unwrap();

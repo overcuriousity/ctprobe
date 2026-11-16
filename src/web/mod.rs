@@ -38,13 +38,9 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(engine: Arc<QueryEngine>, pipe: PipelineHandle) -> AppState {
-        let client = crate::http::client_builder()
-            .timeout(std::time::Duration::from_secs(20))
-            .build()
-            .expect("HTTP client");
-        AppState { engine, pipe, client, sse_clients: Arc::new(AtomicUsize::new(0)),
-            v1: Arc::new(v1::Gate::new()),
-        }
+        let client =
+            crate::http::client_builder().timeout(std::time::Duration::from_secs(20)).build().expect("HTTP client");
+        AppState { engine, pipe, client, sse_clients: Arc::new(AtomicUsize::new(0)), v1: Arc::new(v1::Gate::new()) }
     }
 }
 
@@ -97,17 +93,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/cert/{log}/{index}", get(api::cert))
         .nest("/api/v1", v1::router())
         .with_state(state)
-        .layer(SetResponseHeaderLayer::overriding(
-            header::CONTENT_SECURITY_POLICY,
-            HeaderValue::from_static(CSP),
-        ))
-        .layer(SetResponseHeaderLayer::overriding(
-            header::X_CONTENT_TYPE_OPTIONS,
-            HeaderValue::from_static("nosniff"),
-        ))
+        .layer(SetResponseHeaderLayer::overriding(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(CSP)))
+        .layer(SetResponseHeaderLayer::overriding(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff")))
 }
 
 pub async fn serve(listener: tokio::net::TcpListener, state: AppState) -> std::io::Result<()> {
     axum::serve(listener, router(state)).await
 }
-
