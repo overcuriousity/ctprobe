@@ -52,13 +52,15 @@ fn remove_day(data: &Path, day: NaiveDate) -> Result<u64> {
 }
 
 /// Removes the days of `table` older than `max_days`. With an archive, a day
-/// goes only once `step` has marked it as archived.
+/// goes only once `step` has marked it as archived; without one, once nightly
+/// has finished it (`domains` reads `certs`).
 fn expire_by_age(data: &Path, table: &str, step: &str, max_days: u32, archive: bool, today: NaiveDate) -> Result<()> {
     for (d, p) in days(&data.join(table)) {
         if d >= today || (today - d).num_days() <= i64::from(max_days) {
             continue;
         }
-        if archive && !step_done(data, &d.format("%Y-%m-%d").to_string(), step) {
+        let name = d.format("%Y-%m-%d").to_string();
+        if !step_done(data, &name, if archive { step } else { "domains" }) {
             continue;
         }
         std::fs::remove_dir_all(p)?;
@@ -102,7 +104,13 @@ pub fn enforce(data: &Path, r: &Retention, today: NaiveDate) -> Result<Option<St
     let (done, pending): (Vec<_>, Vec<_>) = all.into_iter().partition(finished);
     // With an archive, days it already holds go before days it does not.
     let (archived, unarchived): (Vec<_>, Vec<_>) = if r.archive {
-        done.into_iter().partition(|d| step_done(data, &d.format("%Y-%m-%d").to_string(), "archive"))
+        done.into_iter().partition(|d| {
+            let name = d.format("%Y-%m-%d").to_string();
+            let held = |table: &str, step: &str| {
+                step_done(data, &name, step) || !data.join(table).join(format!("day={name}")).exists()
+            };
+            held("certs", "archive") && held("dns", "archive-dns")
+        })
     } else {
         (done, vec![])
     };

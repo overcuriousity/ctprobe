@@ -319,6 +319,9 @@ mod retention {
             put(d.path(), "dns", ago, 10);
         }
         put(d.path(), "certs", 0, 10);
+        for ago in [3, 4] {
+            mark(d.path(), ago, "domains");
+        }
         let r = ret(BIG, Some(2), None, false);
         assert_eq!(enforce(d.path(), &r, today()).unwrap(), None);
         for ago in [0, 1, 2] {
@@ -330,6 +333,24 @@ mod retention {
         for ago in [1, 2, 3, 4] {
             assert!(has(d.path(), "dns", ago), "dns {ago}");
         }
+    }
+
+    #[test]
+    fn age_spares_days_nightly_has_not_finished() {
+        let d = tempfile::tempdir().unwrap();
+        for ago in [3, 4] {
+            put(d.path(), "certs", ago, 10);
+            put(d.path(), "dns", ago, 10);
+        }
+        let r = ret(BIG, Some(2), Some(2), false);
+        assert_eq!(enforce(d.path(), &r, today()).unwrap(), None);
+        for ago in [3, 4] {
+            assert!(has(d.path(), "certs", ago) && has(d.path(), "dns", ago), "{ago}");
+        }
+        mark(d.path(), 4, "domains");
+        enforce(d.path(), &r, today()).unwrap();
+        assert!(!has(d.path(), "certs", 4) && !has(d.path(), "dns", 4));
+        assert!(has(d.path(), "certs", 3) && has(d.path(), "dns", 3));
     }
 
     #[test]
@@ -391,7 +412,22 @@ mod retention {
     }
 
     #[test]
-    fn budget_last_resort_logs_and_removes() {
+    fn budget_treats_unarchived_dns_as_last_resort() {
+        let d = tempfile::tempdir().unwrap();
+        for ago in [3, 4] {
+            put(d.path(), "certs", ago, 1000);
+            mark(d.path(), ago, "domains");
+            mark(d.path(), ago, "archive");
+        }
+        put(d.path(), "dns", 4, 10); // No `.archive-dns`.
+        let r = ret(1500, None, None, true);
+        assert_eq!(enforce(d.path(), &r, today()).unwrap(), None);
+        assert!(!has(d.path(), "certs", 3), "fully archived day goes first");
+        assert!(has(d.path(), "certs", 4) && has(d.path(), "dns", 4));
+    }
+
+    #[test]
+    fn budget_last_resort_removes_unarchived_days() {
         let d = tempfile::tempdir().unwrap();
         let before = archive(d.path());
         for ago in [3, 4] {
