@@ -1,5 +1,8 @@
 use chrono::NaiveDate;
 use ctprobe::config::Config;
+use ctprobe::dns::outcome::{Lookup, Status};
+use ctprobe::dns::queue::Kind;
+use ctprobe::dns::DnsRow;
 use ctprobe::fetch::FetchOpts;
 use ctprobe::mocklog::{MockLog, MockOpts};
 use ctprobe::pipeline::{Pipeline, PipelineOpts};
@@ -26,6 +29,7 @@ struct App {
 #[derive(Default)]
 struct Setup {
     certs: Vec<CertRow>,
+    dns: Vec<DnsRow>,
     archive: Vec<i64>,
     timeout: Option<Duration>,
 }
@@ -37,10 +41,13 @@ async fn app() -> App {
 async fn app_with(setup: Setup) -> App {
     let log = MockLog::start(MockOpts::rfc6962(0)).await;
     let dir = tempfile::tempdir().unwrap();
-    if !setup.certs.is_empty() {
+    if !setup.certs.is_empty() || !setup.dns.is_empty() {
         let mut w = Writer::open(dir.path(), 0).unwrap();
         for r in setup.certs {
             w.push_cert(r);
+        }
+        for r in setup.dns {
+            w.push_dns(r);
         }
         w.flush(1).unwrap();
         w.publish(1).unwrap();
@@ -524,4 +531,202 @@ async fn certs_takes_the_archive_permit_when_there_is_an_archive() {
     assert_eq!(s, 429, "{b}");
     let (s, _, _) = get(&a, "/api/v1/search?q=one.com").await;
     assert_eq!(s, 200);
+}
+
+/// A first-attempt probe of `name`, `at` ms into day `D`.
+fn probe(name: &str, at: i64, v4: &[&str]) -> DnsRow {
+    let lookup = Lookup {
+        status: Status::Resolved,
+        v4: v4.iter().map(|a| a.parse().unwrap()).collect(),
+        v6: vec![],
+        cnames: vec![],
+        ttl: Some(60),
+    };
+    DnsRow {
+        probed_at_ms: at,
+        name: name.into(),
+        kind: Kind::Name,
+        reg_domain: names::registered_domain(name),
+        cert_hash: 1,
+        cert_seen_at_ms: D,
+        attempt: 0,
+        renewal: "new",
+        lookup,
+        latency_ms: 5,
+        last_miss_ms: None,
+        prev: None,
+    }
+}
+
+/// Three probes of one name, the last with a new address: two rows remain.
+fn changing_name() -> Vec<DnsRow> {
+    vec![
+        probe("www.example.com", D + 1000, &["1.1.1.1"]),
+        probe("www.example.com", D + 2000, &["1.1.1.1"]),
+        probe("www.example.com", D + 3000, &["2.2.2.2"]),
+    ]
+}
+
+fn dns_dir(a: &App, ms: i64) -> std::path::PathBuf {
+    let day = chrono::DateTime::from_timestamp_millis(ms).unwrap().date_naive();
+    a._dir.path().join("dns").join(format!("day={}", day.format("%Y-%m-%d")))
+}
+
+fn dns_rows(p: &Value) -> Vec<Value> {
+    p["dns"]["rows"].as_array().unwrap().clone()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn domain_summary_from_the_index() {
+    let certs = vec![cert(1, &["a.example.com"], D + 10), cert(2, &["b.example.com"], D + 5000)];
+    let a = app_with(Setup { certs, dns: changing_name(), ..Default::default() }).await;
+    let hits = page(&a, "/api/search?q=example.com&mode=exact").await;
+    let hit = &hits[0];
+    assert_eq!(hit["domain"], "example.com");
+    let p = page(&a, "/api/v1/domain/example.com").await;
+    assert_eq!(p["domain"], "example.com");
+    assert_eq!(p["first_seen"], hit["first_seen_ms"]);
+    assert_eq!(p["last_seen"], hit["last_seen_ms"]);
+    assert_eq!(p["cert_count"], hit["cert_count"]);
+    assert_eq!(p["cert_count"], 2);
+    assert!(p["first_seen"].is_i64() && p["last_seen"].is_i64(), "{p}");
+    assert_eq!(dns_rows(&p).len(), 2, "{p}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deeper_name_is_reduced() {
+    let a = app_with(Setup { certs: vec![cert(1, &["www.example.com"], D + 10)], ..Default::default() }).await;
+    let p = page(&a, "/api/v1/domain/www.example.com").await;
+    assert_eq!(p["domain"], "example.com");
+    assert_eq!(p["cert_count"], 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unknown_domain_is_404() {
+    let a = app().await;
+    let (s, _, b) = get(&a, "/api/v1/domain/never-seen.com").await;
+    assert_eq!(s, 404, "{b}");
+    assert_eq!(code(&b), "not_found");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dns_only_domain_has_null_summary() {
+    let a = app_with(Setup { dns: changing_name(), ..Default::default() }).await;
+    let p = page(&a, "/api/v1/domain/example.com").await;
+    for k in ["first_seen", "last_seen", "cert_count"] {
+        assert!(p[k].is_null(), "{k}: {p}");
+    }
+    assert_eq!(dns_rows(&p).len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dns_rows_same_before_and_after_archiving() {
+    let a = app_with(Setup { dns: changing_name(), archive: vec![D], ..Default::default() }).await;
+    let hot = dns_rows(&page(&a, "/api/v1/domain/example.com").await);
+    assert_eq!(hot.len(), 2, "{hot:?}");
+    assert!(hot.iter().all(|r| r["tier"] == "hot"), "{hot:?}");
+    assert_eq!(hot[0]["probed_at"], D + 3000);
+    assert_eq!(hot[0]["v4"], serde_json::json!(["2.2.2.2"]));
+    assert_eq!(hot[1]["probed_at"], D + 1000);
+    assert_eq!(hot[0]["name"], "www.example.com");
+    assert_eq!(hot[0]["status"], "resolved");
+    assert_eq!(hot[0]["v6"], serde_json::json!([]));
+    std::fs::remove_dir_all(dns_dir(&a, D)).unwrap();
+    let cold = dns_rows(&page(&a, "/api/v1/domain/example.com").await);
+    assert_eq!(cold.len(), 2, "{cold:?}");
+    assert!(cold.iter().all(|r| r["tier"] == "archive"), "{cold:?}");
+    let plain = |v: &[Value]| -> Vec<Value> { v.iter().map(without_tier).collect() };
+    assert_eq!(plain(&cold), plain(&hot));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unarchived_dns_day_matches_the_archive() {
+    let archived = app_with(Setup { dns: changing_name(), archive: vec![D], ..Default::default() }).await;
+    let scanned = app_with(Setup { dns: changing_name(), ..Default::default() }).await;
+    let p = "/api/v1/domain/example.com";
+    assert_eq!(dns_rows(&page(&scanned, p).await), dns_rows(&page(&archived, p).await));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn archived_day_is_read_from_archive_only() {
+    let a = app_with(Setup { dns: changing_name(), archive: vec![D], ..Default::default() }).await;
+    // The hot files are still there: reading both would give four rows.
+    assert!(dns_dir(&a, D).exists());
+    let rs = dns_rows(&page(&a, "/api/v1/domain/example.com").await);
+    assert_eq!(rs.len(), 2, "{rs:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn other_domains_names_are_not_mixed_in() {
+    let mut dns = changing_name();
+    dns.push(probe("www.other.org", D + 1500, &["9.9.9.9"]));
+    let a = app_with(Setup { dns, archive: vec![D], ..Default::default() }).await;
+    let rs = dns_rows(&page(&a, "/api/v1/domain/example.com").await);
+    assert!(rs.iter().all(|r| r["name"] == "www.example.com"), "{rs:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dns_paging_returns_every_row_once() {
+    let n = |s: &str| format!("{s}.example.com");
+    let mut dns = vec![];
+    // Day D (archived): ties on probed_at, ordered by name.
+    for s in ["c", "a", "b"] {
+        dns.push(probe(&n(s), D + 500, &["1.1.1.1"]));
+    }
+    dns.push(probe(&n("a"), D + 900, &["1.1.1.2"]));
+    // Day D+1 (hot only).
+    dns.push(probe(&n("a"), D + DAY_MS + 100, &["1.1.1.3"]));
+    dns.push(probe(&n("d"), D + DAY_MS + 100, &["1.1.1.4"]));
+    let a = app_with(Setup { dns, archive: vec![D], ..Default::default() }).await;
+    let all = dns_rows(&page(&a, "/api/v1/domain/example.com?limit=100").await);
+    assert_eq!(all.len(), 6, "{all:?}");
+    let order: Vec<(i64, String)> = all.iter().map(|r| (r["probed_at"].as_i64().unwrap(), r["name"].as_str().unwrap().into())).collect();
+    let mut sorted = order.clone();
+    sorted.sort_by(|x, y| y.0.cmp(&x.0).then(x.1.cmp(&y.1)));
+    assert_eq!(order, sorted);
+    assert_eq!(all[0]["tier"], "hot");
+    for limit in [1, 2, 4] {
+        let mut got = vec![];
+        let mut path = format!("/api/v1/domain/example.com?limit={limit}");
+        for _ in 0..20 {
+            let p = page(&a, &path).await;
+            got.extend(dns_rows(&p));
+            match p["dns"]["next_cursor"].as_str() {
+                Some(c) => path = format!("/api/v1/domain/example.com?limit={limit}&cursor={c}"),
+                None => break,
+            }
+        }
+        assert_eq!(got, all, "limit {limit}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn domain_inputs_are_checked() {
+    let a = app().await;
+    for p in [
+        "/api/v1/domain/not%20a%20name",
+        "/api/v1/domain/example.com?limit=0",
+        "/api/v1/domain/example.com?cursor=garbage",
+        "/api/v1/domain/example.com?bogus=1",
+    ] {
+        let (s, _, b) = get(&a, p).await;
+        assert_eq!(s, 400, "{p}: {b}");
+        assert_eq!(code(&b), "bad_request", "{p}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn domain_timeout_before_the_summary_is_504() {
+    let a = app_with(Setup { dns: changing_name(), timeout: Some(Duration::ZERO), ..Default::default() }).await;
+    let (s, _, b) = get(&a, "/api/v1/domain/example.com").await;
+    assert_eq!(s, 504, "{b}");
+    assert_eq!(code(&b), "timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn domain_takes_the_archive_permit_when_there_is_a_dns_archive() {
+    let a = app_with(Setup { dns: changing_name(), archive: vec![D], ..Default::default() }).await;
+    let _held = a.state.v1.enter(true).unwrap();
+    let (s, _, b) = get(&a, "/api/v1/domain/example.com").await;
+    assert_eq!(s, 429, "{b}");
 }

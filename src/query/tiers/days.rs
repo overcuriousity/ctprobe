@@ -39,7 +39,7 @@ pub(super) struct Got {
 }
 
 /// Columns of a schema, with timestamps as milliseconds.
-fn columns(schema: SchemaRef) -> String {
+pub(super) fn columns(schema: SchemaRef) -> String {
     schema
         .fields()
         .iter()
@@ -51,7 +51,7 @@ fn columns(schema: SchemaRef) -> String {
         .join(", ")
 }
 
-fn objects(r: QueryResult) -> Vec<Map<String, Value>> {
+pub(super) fn objects(r: QueryResult) -> Vec<Map<String, Value>> {
     r.rows.into_iter().map(|row| r.columns.iter().cloned().zip(row).collect()).collect()
 }
 
@@ -111,7 +111,7 @@ impl QueryEngine {
             columns(archive_certs_schema()),
             conds.join(" AND ")
         );
-        let found = objects(self.run_archive(files.to_vec(), sql, n, t).await?);
+        let found = objects(self.run_archive(files.to_vec(), archive_certs_schema(), sql, n, t).await?);
         let mut hot = HashMap::new();
         let mut cut = false;
         let (lo, hi) = (day * MS_PER_DAY, day * MS_PER_DAY + MS_PER_DAY - 1);
@@ -202,12 +202,19 @@ impl QueryEngine {
 
     /// A query over archive files on the query runtime, bounded by `t` but
     /// outside the limiter, so it cannot queue in front of other endpoints.
-    async fn run_archive(&self, files: Vec<PathBuf>, sql: String, limit: usize, t: Duration) -> Result<QueryResult, QueryError> {
+    pub(super) async fn run_archive(
+        &self,
+        files: Vec<PathBuf>,
+        schema: SchemaRef,
+        sql: String,
+        limit: usize,
+        t: Duration,
+    ) -> Result<QueryResult, QueryError> {
         let data = self.data.clone();
         let task = self.rt.spawn(async move {
             let work = async {
                 let ctx = session(&data, MEMORY, PARTITIONS)?;
-                register_files(&ctx, "a", archive_certs_schema(), &files).await?;
+                register_files(&ctx, "a", schema, &files).await?;
                 let df = ctx.sql(&sql).await?;
                 let schema = SchemaRef::new(df.schema().as_arrow().clone());
                 let batches = df.collect().await?;

@@ -1,6 +1,7 @@
 //! `/api/v1`: a stable JSON API with a uniform error body and load limits.
 
 mod certs;
+mod domain;
 pub mod error;
 pub mod input;
 
@@ -60,6 +61,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/search", get(search))
         .route("/certs", get(certs::certs))
+        .route("/domain/{domain}", get(domain::domain))
         .method_not_allowed_fallback(not_found)
         .fallback(not_found)
 }

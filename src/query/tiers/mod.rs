@@ -3,12 +3,15 @@
 //! read from it; a day without one is scanned in the hot tier and split there.
 
 mod days;
+mod dns;
 
 use super::sql::{days_of, quote, MS_PER_DAY};
 use super::{QueryEngine, QueryError};
 use crate::store::{archive_days, list_archive};
+use std::path::PathBuf;
 use base64::Engine;
 use days::Start;
+pub use dns::DnsCursor;
 use serde::Serialize;
 use serde_json::Value;
 use std::cmp::Reverse;
@@ -145,6 +148,25 @@ impl Scope<'_> {
 }
 
 impl QueryEngine {
+    /// The archive's files by day, and the days with hot files, of `table`.
+    /// Directory listings and footers: blocking reads, kept off the web
+    /// workers and bounded by `t`.
+    async fn list_days(
+        &self,
+        table: &'static str,
+        ts: &'static str,
+        from: Option<i64>,
+        to: Option<i64>,
+        t: Duration,
+    ) -> Result<(BTreeMap<i64, Vec<PathBuf>>, Vec<i64>), QueryError> {
+        let data = self.data.clone();
+        let job = self.rt.spawn_blocking(move || (archive_days(&data, table, ts), days_of(&data, table, from, to)));
+        tokio::time::timeout(t, job)
+            .await
+            .map_err(|_| QueryError::Timeout)?
+            .map_err(|e| QueryError::Failed(e.to_string()))
+    }
+
     /// True when the certificate archive holds a file.
     pub fn has_cert_archive(&self) -> bool {
         !list_archive(&self.data, "certs").is_empty()
@@ -193,14 +215,7 @@ impl QueryEngine {
         } else {
             // Directory listings and footers: blocking reads, kept off the web workers.
             let t = left().ok_or(QueryError::Timeout)?;
-            let (data, from, to) = (self.data.clone(), f.from_ms, f.to_ms);
-            let job = self.rt.spawn_blocking(move || {
-                (archive_days(&data, "certs", "seen_at"), days_of(&data, "certs", from, to))
-            });
-            tokio::time::timeout(t, job)
-                .await
-                .map_err(|_| QueryError::Timeout)?
-                .map_err(|e| QueryError::Failed(e.to_string()))?
+            self.list_days("certs", "seen_at", f.from_ms, f.to_ms, t).await?
         };
         let in_range = |d: &i64| {
             f.from_ms.is_none_or(|t| *d >= t.div_euclid(MS_PER_DAY)) && f.to_ms.is_none_or(|t| *d <= t.div_euclid(MS_PER_DAY))
