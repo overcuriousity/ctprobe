@@ -15,13 +15,13 @@ use parquet::schema::types::ColumnPath;
 use std::path::Path;
 
 /// Distinct values a bloom filter is sized for, per row group.
-const BLOOM_NDV: u64 = 5_000_000;
+pub(super) const BLOOM_NDV: u64 = 5_000_000;
 /// `dns` row groups hold a million rows, so no column has more distinct values.
 const DNS_BLOOM_NDV: u64 = 1_000_000;
 
 /// Writer settings with a bloom filter on each of `bloom`, so lookups by
 /// those columns skip the row groups that cannot hold the value.
-fn props(bloom: &[(&str, u64)]) -> WriterProperties {
+pub(super) fn props(bloom: &[(&str, u64)]) -> WriterProperties {
     let mut b = WriterProperties::builder()
         .set_compression(Compression::ZSTD(ZstdLevel::try_new(6).expect("valid level")))
         .set_max_row_group_row_count(Some(1_000_000));

@@ -277,7 +277,7 @@ impl Pipeline {
             let t = tokio::spawn(async move {
                 loop {
                     let today = chrono::Utc::now().date_naive();
-                    for day in nightly::pending_days(&cfg2.data_dir, today) {
+                    for day in nightly::pending_days(&cfg2.data_dir, today, cfg2.archive_budget_bytes.is_some()) {
                         tracing::info!("nightly job for {day}");
                         if let Err(e) = nightly::run_nightly(&cfg2, day).await {
                             tracing::error!("nightly job for {day} failed: {e:#}");

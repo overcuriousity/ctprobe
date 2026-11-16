@@ -73,6 +73,24 @@ pub fn list_day(data: &Path, table: &str, day: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Where the archive keeps one day of `table`.
+pub fn archive_file(data: &Path, table: &str, day: &str) -> PathBuf {
+    data.join("archive").join(table).join(format!("{day}.parquet"))
+}
+
+/// Every Parquet file in the archive directory of `table`, whatever its name.
+pub fn list_archive(data: &Path, table: &str) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = std::fs::read_dir(data.join("archive").join(table))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "parquet"))
+        .collect();
+    out.sort();
+    out
+}
+
 /// First and last seen day (since the epoch) and count in one FST value.
 pub fn pack_domain(first_ms: i64, last_ms: i64, count: i64) -> u64 {
     let day = |ms: i64| (ms / 86_400_000).clamp(0, u16::MAX as i64) as u64;

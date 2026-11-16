@@ -1,6 +1,7 @@
 //! Daily maintenance. Each step is recorded by a marker file and writes its
 //! output atomically, so a rerun after a crash repeats only unfinished work.
 
+pub mod archive;
 mod compact;
 mod domains;
 pub mod expire;
@@ -45,6 +46,25 @@ pub async fn run_nightly(cfg: &Config, day: NaiveDate) -> Result<()> {
         domains::run(data, &d).await?;
         mark(data, &d, "domains")?;
     }
+    if let Some(budget) = cfg.archive_budget_bytes {
+        if !step_done(data, &d, "archive") {
+            match archive::certs(data, &d, budget).await? {
+                archive::Outcome::Written { rows, bytes } => {
+                    mark(data, &d, "archive")?;
+                    let total = archive::archive_size(data);
+                    tracing::info!(
+                        "archive {total} bytes, {} bytes per row on {d}, {} days left",
+                        bytes / rows.max(1),
+                        archive::days_left(data, budget, total)
+                    );
+                }
+                archive::Outcome::Empty => mark(data, &d, "archive")?,
+                archive::Outcome::BudgetFull => {
+                    tracing::warn!("archive budget is full, {d} is not archived");
+                }
+            }
+        }
+    }
     cleanup(data)?;
     expire::enforce(data, cfg.disk_budget_bytes, Utc::now().date_naive())?;
     Ok(())
@@ -81,7 +101,8 @@ pub fn cleanup(data: &Path) -> Result<()> {
 }
 
 /// Finished days present on disk that the nightly job has not completed.
-pub fn pending_days(data: &Path, today: NaiveDate) -> Vec<NaiveDate> {
+/// With `archive`, days whose archive step is unfinished are pending too.
+pub fn pending_days(data: &Path, today: NaiveDate, archive: bool) -> Vec<NaiveDate> {
     let mut out: Vec<NaiveDate> = std::fs::read_dir(data.join("certs"))
         .into_iter()
         .flatten()
@@ -90,7 +111,10 @@ pub fn pending_days(data: &Path, today: NaiveDate) -> Vec<NaiveDate> {
             let n = e.file_name().to_string_lossy().into_owned();
             NaiveDate::parse_from_str(n.strip_prefix("day=")?, "%Y-%m-%d").ok()
         })
-        .filter(|d| *d < today && !step_done(data, &d.format("%Y-%m-%d").to_string(), "domains"))
+        .filter(|d| {
+            let s = d.format("%Y-%m-%d").to_string();
+            *d < today && (!step_done(data, &s, "domains") || (archive && !step_done(data, &s, "archive")))
+        })
         .collect();
     out.sort();
     out
