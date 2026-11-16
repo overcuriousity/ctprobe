@@ -209,10 +209,46 @@ async fn pages_have_csp_and_render() {
     let a = app(vec![], false).await;
     let r = reqwest::get(format!("{}/", a.base)).await.unwrap();
     assert_eq!(r.status(), 200);
-    assert!(r.headers()["content-security-policy"].to_str().unwrap().contains("default-src 'self'"));
+    let csp = r.headers()["content-security-policy"].to_str().unwrap().to_string();
+    assert!(csp.contains("default-src 'none'") && !csp.contains("unsafe"));
+    assert_eq!(r.headers()["referrer-policy"], "same-origin");
     assert!(r.text().await.unwrap().contains("ctprobe"));
     let r = reqwest::get(format!("{}/assets/uplot.min.js", a.base)).await.unwrap();
     assert_eq!(r.status(), 200);
+    a.pipe.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pages_carry_no_inline_style_or_script() {
+    let a = app(vec![], false).await;
+    for path in ["/", "/sizing", "/trends", "/search", "/sql", "/cert", "/domain", "/dns"] {
+        let html = reqwest::get(format!("{}{path}", a.base)).await.unwrap().text().await.unwrap();
+        assert!(!html.contains("style=") && !html.contains("<style"), "{path} has an inline style");
+        assert!(!html.contains("<script>") && !html.contains(" onclick="), "{path} has an inline script");
+    }
+    a.pipe.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn versioned_assets_are_cached_for_good_and_others_revalidate() {
+    let a = app(vec![], false).await;
+    let html = reqwest::get(format!("{}/", a.base)).await.unwrap().text().await.unwrap();
+    let start = html.find("/assets/app.css?v=").unwrap();
+    let url = &html[start..start + html[start..].find('"').unwrap()];
+    let r = reqwest::get(format!("{}{url}", a.base)).await.unwrap();
+    assert!(r.headers()["cache-control"].to_str().unwrap().contains("immutable"));
+    let r = reqwest::get(format!("{}/assets/app.css", a.base)).await.unwrap();
+    assert_eq!(r.headers()["cache-control"], "no-cache");
+    let etag = r.headers()["etag"].clone();
+    let r = reqwest::Client::new()
+        .get(format!("{}/assets/app.css", a.base))
+        .header("if-none-match", etag)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 304);
+    let r = reqwest::get(format!("{}/assets/fonts/atkinson-next-400.woff2", a.base)).await.unwrap();
+    assert_eq!(r.headers()["content-type"], "font/woff2");
     a.pipe.shutdown().await.unwrap();
 }
 

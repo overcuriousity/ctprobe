@@ -9,19 +9,20 @@ mod v1;
 
 use crate::pipeline::PipelineHandle;
 use crate::query::QueryEngine;
-use axum::extract::Path;
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::extract::{Path, RawQuery};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use rust_embed::RustEmbed;
 use std::sync::atomic::AtomicUsize;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tower_http::set_header::SetResponseHeaderLayer;
 
 pub const MAX_SSE_CLIENTS: usize = 100;
-const CSP: &str = "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
-                   object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; \
+                   font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+const IMMUTABLE: &str = "public, max-age=31536000, immutable";
 
 #[derive(RustEmbed)]
 #[folder = "assets/"]
@@ -44,27 +45,58 @@ impl AppState {
     }
 }
 
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Changes whenever any embedded file does, so versioned URLs can be cached for good.
+fn assets_version() -> &'static str {
+    static VERSION: OnceLock<String> = OnceLock::new();
+    VERSION.get_or_init(|| {
+        let mut all = Vec::new();
+        for name in Assets::iter() {
+            if let Some(f) = Assets::get(&name) {
+                all.extend_from_slice(&f.metadata.sha256_hash());
+            }
+        }
+        format!("{:016x}", xxhash_rust::xxh3::xxh3_64(&all))
+    })
+}
+
 fn page(name: &str, title: &str) -> Response {
     let layout = Assets::get("layout.html").expect("embedded layout");
     let body = Assets::get(&format!("{name}.html")).expect("embedded page");
     let html = String::from_utf8_lossy(&layout.data)
         .replace("{{title}}", title)
         .replace("{{page}}", name)
+        .replace("{{v}}", assets_version())
         .replace("{{body}}", &String::from_utf8_lossy(&body.data));
-    Html(html).into_response()
+    ([(header::CACHE_CONTROL, "no-cache")], Html(html)).into_response()
 }
 
-async fn asset(Path(path): Path<String>) -> Response {
+async fn asset(Path(path): Path<String>, RawQuery(query): RawQuery, headers: HeaderMap) -> Response {
     let Some(f) = Assets::get(&path) else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    let etag = format!("\"{}\"", hex(&f.metadata.sha256_hash()[..12]));
+    // Only a URL that names the version may be kept without asking again.
+    let versioned = query.is_some_and(|q| q == format!("v={}", assets_version()));
+    let cache = if versioned { IMMUTABLE } else { "no-cache" };
+    if headers.get(header::IF_NONE_MATCH).is_some_and(|v| v.as_bytes() == etag.as_bytes()) {
+        return (StatusCode::NOT_MODIFIED, [(header::ETAG, etag), (header::CACHE_CONTROL, cache.into())])
+            .into_response();
+    }
     let mime = match path.rsplit('.').next() {
         Some("js") => "text/javascript; charset=utf-8",
         Some("css") => "text/css; charset=utf-8",
         Some("woff2") => "font/woff2",
         _ => "application/octet-stream",
     };
-    ([(header::CONTENT_TYPE, mime)], f.data.into_owned()).into_response()
+    (
+        [(header::CONTENT_TYPE, mime.to_string()), (header::ETAG, etag), (header::CACHE_CONTROL, cache.into())],
+        f.data.into_owned(),
+    )
+        .into_response()
 }
 
 pub fn router(state: AppState) -> Router {
@@ -95,6 +127,11 @@ pub fn router(state: AppState) -> Router {
         .nest("/api/v1", v1::router())
         .with_state(state)
         .layer(SetResponseHeaderLayer::overriding(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(CSP)))
+        .layer(SetResponseHeaderLayer::overriding(header::REFERRER_POLICY, HeaderValue::from_static("same-origin")))
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("cross-origin-opener-policy"),
+            HeaderValue::from_static("same-origin"),
+        ))
         .layer(SetResponseHeaderLayer::overriding(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff")))
 }
 
