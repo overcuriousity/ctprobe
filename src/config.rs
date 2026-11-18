@@ -55,11 +55,19 @@ pub struct DnsConfig {
     pub sample_pct: f64,
     /// Memory cap for the last answer per name, used to detect changes.
     pub state_max_bytes: u64,
+    /// Names waiting for a later probe; above it the names seen longest ago go.
+    pub queue_max: u64,
 }
 
 impl Default for DnsConfig {
     fn default() -> Self {
-        DnsConfig { resolver: None, max_qps: DEFAULT_DNS_QPS, sample_pct: 100.0, state_max_bytes: DEFAULT_DNS_STATE }
+        DnsConfig {
+            resolver: None,
+            max_qps: DEFAULT_DNS_QPS,
+            sample_pct: 100.0,
+            state_max_bytes: DEFAULT_DNS_STATE,
+            queue_max: DEFAULT_DNS_QUEUE,
+        }
     }
 }
 
@@ -71,6 +79,8 @@ impl DnsConfig {
 
 const DEFAULT_DNS_QPS: u32 = 2000;
 const DEFAULT_DNS_STATE: u64 = 2 << 30;
+/// About 2.5 GiB of queue file; a commit stays well under a second at this size.
+const DEFAULT_DNS_QUEUE: u64 = 20_000_000;
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -79,6 +89,7 @@ struct RawDns {
     max_qps: Option<u32>,
     sample_pct: Option<f64>,
     state_max: Option<String>,
+    queue_max: Option<u64>,
 }
 
 /// `1.2.3.4`, `1.2.3.4:5335`, `::1` or `[::1]:5335`; port 53 when absent.
@@ -106,7 +117,11 @@ impl RawDns {
             Some(s) => parse_size(s)?,
             None => DEFAULT_DNS_STATE,
         };
-        Ok(DnsConfig { resolver, max_qps, sample_pct, state_max_bytes })
+        let queue_max = self.queue_max.unwrap_or(DEFAULT_DNS_QUEUE);
+        if queue_max == 0 {
+            bail!("dns.queue_max must be at least 1");
+        }
+        Ok(DnsConfig { resolver, max_qps, sample_pct, state_max_bytes, queue_max })
     }
 }
 
@@ -203,6 +218,7 @@ mod tests {
         assert_eq!(c.coverage_target, 95.0);
         assert_eq!(c.dns.resolver.unwrap().to_string(), "127.0.0.1:5335");
         assert_eq!((c.dns.max_qps, c.dns.sample_pct, c.dns.state_max_bytes), (2000, 100.0, 2 << 30));
+        assert_eq!(c.dns.queue_max, 20_000_000);
     }
 
     #[test]
@@ -219,6 +235,9 @@ mod tests {
         assert_eq!(c.resolver.unwrap().to_string(), "127.0.0.1:5335");
         assert_eq!((c.max_qps, c.sample_pct, c.state_max_bytes), (100, 25.0, 64 << 20));
         assert_eq!(load("[dns]\nresolver = \"::1\"\n").unwrap().resolver.unwrap().to_string(), "[::1]:53");
+        assert_eq!(load("[dns]\nqueue_max = 5000\n").unwrap().queue_max, 5000);
+        assert_eq!(load("[dns]\n").unwrap().queue_max, 20_000_000);
+        assert!(load("[dns]\nqueue_max = 0\n").is_err());
         assert_eq!(load("[dns]\n").unwrap(), DnsConfig::default());
         assert!(load("[dns]\nresolver = \"not an ip\"\n").is_err());
         assert!(load("[dns]\nresolver = \"::1\"\nsample_pct = 0\n").is_err());

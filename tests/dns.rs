@@ -38,7 +38,13 @@ fn cert(hash: u64, names: &[&str], renewal: RenewalClass) -> CertRow {
 }
 
 fn cfg(resolver: SocketAddr) -> DnsConfig {
-    DnsConfig { resolver: Some(resolver), max_qps: 10_000, sample_pct: 100.0, state_max_bytes: 1 << 20 }
+    DnsConfig {
+        resolver: Some(resolver),
+        max_qps: 10_000,
+        sample_pct: 100.0,
+        state_max_bytes: 1 << 20,
+        queue_max: 1_000_000,
+    }
 }
 
 fn opts(schedule_ms: &[u64]) -> DnsOpts {
@@ -259,6 +265,25 @@ async fn waiting_names_survive_a_restart() {
     assert_eq!(r.waiting, 0);
     let row = run.row("soon.example.com", 1);
     assert_eq!((row.cert_hash, row.lookup.status), (1, Status::Resolved));
+    run.stop();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_queue_drops_the_names_seen_longest_ago() {
+    let m = MockDns::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let c = DnsConfig { queue_max: 2, ..cfg(m.addr()) };
+    let mut run = Run::start(c, opts(&[0, 60_000]), dir.path());
+    let mut old = cert(1, &["old-a.example.com", "old-b.example.com"], RenewalClass::New);
+    old.seen_at_ms -= 1_000;
+    run.link.submit(&old);
+    run.link.submit(&cert(2, &["new-a.example.com", "new-b.example.com"], RenewalClass::New));
+    let r = run.until("trim", |r, _| r.names.first.probes == 4 && r.dropped_full == 2).await;
+    assert_eq!(r.waiting, 2);
+    // A dropped name is no longer in progress, so a new certificate probes it again.
+    run.link.submit(&cert(3, &["old-a.example.com"], RenewalClass::Name));
+    let r = run.until("probed again", |r, _| r.names.first.probes == 5).await;
+    assert_eq!(r.already_pending, 0);
     run.stop();
 }
 

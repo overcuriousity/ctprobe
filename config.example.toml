@@ -29,3 +29,5 @@ max_qps = 2000
 sample_pct = 100
 # Memory for the last answer per name, used to detect changes.
 state_max = "2GiB"
+# Names waiting for a later probe; over it, those seen longest ago are dropped.
+queue_max = 20000000
