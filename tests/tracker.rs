@@ -266,6 +266,24 @@ fn eviction_on_open_drops_only_the_oldest_days_needed() {
 }
 
 #[test]
+fn one_busy_day_stays_under_cap_through_repeated_evictions() {
+    // Every name from the same day: eviction must halve by count, since after
+    // one eviction by a key bit the survivors all share that bit. Ten names per
+    // certificate make the names table, not the exempt dedup table, grow.
+    let d = tempfile::tempdir().unwrap();
+    let cap = 8 << 20;
+    let mut t = Tracker::open(d.path(), cap, 0).unwrap();
+    for i in 0..60_000u32 {
+        let names: Vec<String> = (0..10).map(|j| format!("n{i}-{j}.example.com")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        t.observe(meta(0), &cert(&format!("{i:x}"), &refs), 100);
+        assert!(t.bytes_used() <= cap, "at {i}: {} > {cap}", t.bytes_used());
+    }
+    let r = t.observe(meta(0), &cert("probe", &["n59999-0.example.com"]), 100).row.unwrap();
+    assert_ne!(r.renewal, RenewalClass::New);
+}
+
+#[test]
 fn table_growth_stays_under_cap_without_commits() {
     let d = tempfile::tempdir().unwrap();
     let cap = 3 << 20;
