@@ -60,11 +60,30 @@ pub struct Tracker {
     pending: Vec<u8>,
     pending_records: u64,
     wal: File,
+    /// Whether the dedup-over-cap warning was given since the last eviction.
+    over_cap_warned: bool,
 }
 
 const DEDUP: u8 = 0;
 const NAMES: u8 = 1;
 const SETS: u8 = 2;
+
+/// An upper bound on the allocation of a table holding `n` entries after
+/// `shrink_to_fit`: buckets for 7/8 load, rounded up to a power of two, at one
+/// slot and one control byte each, plus a control group of padding and tail.
+fn table_bytes(n: u64) -> u64 {
+    if n == 0 {
+        return 0;
+    }
+    let buckets = if n < 4 {
+        4
+    } else if n < 8 {
+        8
+    } else {
+        (n * 8).div_ceil(7).next_power_of_two()
+    };
+    buckets * SLOT_BYTES + 32
+}
 
 fn replay_wal(path: &Path, tables: &mut [Table; 3], committed: u64) -> Result<u64> {
     let mut f = OpenOptions::new().create(true).truncate(false).read(true).write(true).open(path)?;
@@ -136,7 +155,15 @@ impl Tracker {
         replay_wal(&wal_path, &mut tables, committed_epoch).context("replaying tracker WAL")?;
         let mut wal = OpenOptions::new().read(true).write(true).open(&wal_path)?;
         wal.seek(SeekFrom::End(0))?;
-        let mut t = Tracker { dir: dir.to_path_buf(), max_bytes, tables, pending: Vec::new(), pending_records: 0, wal };
+        let mut t = Tracker {
+            dir: dir.to_path_buf(),
+            max_bytes,
+            tables,
+            pending: Vec::new(),
+            pending_records: 0,
+            wal,
+            over_cap_warned: false,
+        };
         t.evict();
         Ok(t)
     }
@@ -344,23 +371,66 @@ impl Tracker {
         self.tables.iter().map(|t| t.allocation_size() as u64).sum()
     }
 
-    /// Removes the oldest names and name sets until usage is under the cap.
-    /// Dedup entries are exempt: they expire on their own after 7 days.
+    /// Removes the oldest names and name sets until usage is under the cap, in
+    /// one pass: the cutoff day comes from one count per day, then each table
+    /// is filtered and shrunk once. Dedup entries are exempt, as they expire on
+    /// their own after 7 days; when dedup alone fills the cap, names are kept,
+    /// since dropping all of them would forget every renewal and still not fit.
     fn evict(&mut self) {
-        let mut guard = 0;
-        while self.bytes_used() > self.max_bytes && guard < 64 {
-            guard += 1;
-            let oldest = [NAMES, SETS]
-                .iter()
-                .flat_map(|t| self.tables[*t as usize].values())
-                .map(|d| u16::from_le_bytes(*d))
-                .min();
-            let Some(oldest) = oldest else { break };
-            for t in [NAMES, SETS] {
-                let table = &mut self.tables[t as usize];
-                table.retain(|_, d| u16::from_le_bytes(*d) != oldest);
-                table.shrink_to_fit();
+        if self.bytes_used() <= self.max_bytes {
+            return;
+        }
+        let dedup = self.tables[DEDUP as usize].allocation_size() as u64;
+        let Some(budget) = self.max_bytes.checked_sub(dedup) else {
+            if !self.over_cap_warned {
+                tracing::warn!(
+                    "tracker dedup table uses {dedup} bytes, over tracker_max {}; names are kept",
+                    self.max_bytes
+                );
+                self.over_cap_warned = true;
             }
+            return;
+        };
+        let mut days: BTreeMap<u16, [u64; 2]> = BTreeMap::new();
+        for (i, t) in [NAMES, SETS].into_iter().enumerate() {
+            for d in self.tables[t as usize].values() {
+                days.entry(u16::from_le_bytes(*d)).or_default()[i] += 1;
+            }
+        }
+        let mut left = [NAMES, SETS].map(|t| self.tables[t as usize].len() as u64);
+        let mut cutoff = None;
+        for (day, n) in days {
+            if table_bytes(left[0]) + table_bytes(left[1]) <= budget {
+                break;
+            }
+            left = [left[0] - n[0], left[1] - n[1]];
+            cutoff = Some(day);
+        }
+        let Some(cutoff) = cutoff else { return };
+        for t in [NAMES, SETS] {
+            let table = &mut self.tables[t as usize];
+            table.retain(|_, d| u16::from_le_bytes(*d) > cutoff);
+            table.shrink_to_fit();
+        }
+        self.over_cap_warned = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn table_bytes_is_never_below_the_real_allocation() {
+        for n in [1u64, 3, 4, 7, 8, 9, 14, 15, 100, 917, 1_000, 4_096, 57_344, 100_000] {
+            let mut t = Table::default();
+            for k in 0..n {
+                t.insert(k.wrapping_mul(0x9E37_79B9_7F4A_7C15).to_le_bytes(), [0, 0]);
+            }
+            t.shrink_to_fit();
+            let real = t.allocation_size() as u64;
+            assert!(table_bytes(n) >= real, "n={n}: {} < {real}", table_bytes(n));
+            assert!(table_bytes(n) <= real * 2 + 64, "n={n}: {} far over {real}", table_bytes(n));
         }
     }
 }
