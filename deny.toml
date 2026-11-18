@@ -5,7 +5,15 @@ all-features = true
 version = 2
 yanked = "deny"
 # Every ignore needs a written reachability argument next to it.
-ignore = []
+ignore = [
+  # Unmaintained, not vulnerable: chrono, chrono-tz and humantime have no
+  # maintainer since 2026-11 (chronotope/chrono#1768) and no fixed release.
+  # arrow, datafusion and object_store depend on them, so they cannot be
+  # replaced here until those move to jiff. Remove once they drop chrono.
+  { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained; required by arrow and datafusion" },
+  { id = "RUSTSEC-2026-0555", reason = "chrono-tz unmaintained; required by arrow-array" },
+  { id = "RUSTSEC-2026-0542", reason = "humantime unmaintained; required by object_store" },
+]
 
 [licenses]
 version = 2

@@ -63,6 +63,7 @@ Then start it:
 | `[dns] max_qps` | Queries per second to the resolver, default 2000. Each probe sends two, A and AAAA. Names that do not fit in a burst are skipped and counted |
 | `[dns] sample_pct` | Percent of names probed, default 100. Chosen by a hash of the name, so the same names are probed on every certificate |
 | `[dns] state_max` | Memory cap for the last answer per name, default `2GiB`. Over it, the oldest are forgotten and their changes go undetected |
+| `[dns] queue_max` | Names waiting for a later probe, default 20000000 (about 2.5 GiB on disk). Over it, the names seen longest ago are dropped, counted as `dropped_full`, and get no further probes |
 
 DNS probing asks each name when its certificate is seen and, while it has no address, again from
 one minute up to 30 days later. Wildcards are asked as written, and for the name they cover when the

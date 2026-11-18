@@ -54,6 +54,10 @@ const TICK: Duration = Duration::from_millis(10);
 const PUBLISH: Duration = Duration::from_millis(250);
 /// How often waiting names are written and due ones taken out.
 const SYNC: Duration = Duration::from_millis(500);
+/// A scheduler pass slower than this is logged with the time of each step.
+const SLOW_PASS: Duration = Duration::from_secs(1);
+/// Certificates taken from the queue in one pass, beyond the one that woke it.
+const JOBS_PER_PASS: usize = 1024;
 
 #[derive(Debug, Clone)]
 pub struct DnsOpts {
@@ -358,6 +362,8 @@ pub struct DnsReport {
     pub skipped_busy: u64,
     pub skipped_stale: u64,
     pub skipped_queue: u64,
+    /// Waiting names dropped, oldest sighting first, to keep the queue at `dns.queue_max`.
+    pub dropped_full: u64,
     pub rows_dropped: u64,
     pub probes: u64,
     pub probes_per_sec: f64,
@@ -433,7 +439,11 @@ pub fn start(
     let (out_tx, out_rx) = std_mpsc::sync_channel(OUT_QUEUE);
     let stats = Arc::new(DnsStats { jobs_dropped: AtomicU64::new(0), report: Mutex::new(DnsReport::default()) });
     let last = LastAnswers::open(&data.join(STATE_FILE), cfg.state_max_bytes);
-    let queue = Queue::open(&data.join(QUEUE_FILE))?;
+    let mut queue = Queue::open(&data.join(QUEUE_FILE))?;
+    let dropped = queue.trim(cfg.queue_max)?.len();
+    if dropped > 0 {
+        tracing::info!("DNS queue over {} names; dropped the {dropped} seen longest ago", cfg.queue_max);
+    }
     let active: HashSet<u64> = queue.keys()?.into_iter().collect();
     let sched = Scheduler::new(cfg, resolver, opts, last, queue, active, out_tx, stats.clone());
     let thread = std::thread::Builder::new().name("ctprobe-dns".into()).spawn(move || {
@@ -539,6 +549,43 @@ fn group_index(k: Kind) -> usize {
     }
 }
 
+/// Times the steps of one scheduler pass.
+struct Pass {
+    start: Instant,
+    last: Instant,
+    steps: Vec<(&'static str, Duration)>,
+}
+
+impl Pass {
+    fn new() -> Pass {
+        let now = Instant::now();
+        Pass { start: now, last: now, steps: Vec::with_capacity(8) }
+    }
+
+    fn step(&mut self, name: &'static str) {
+        let now = Instant::now();
+        self.steps.push((name, now - self.last));
+        self.last = now;
+    }
+
+    /// The pass and the time of each step, when it took `SLOW_PASS` or more.
+    fn slow(&self) -> Option<String> {
+        let took = self.last - self.start;
+        if took < SLOW_PASS {
+            return None;
+        }
+        let steps: Vec<String> = self.steps.iter().map(|(n, d)| format!("{n} {d:.1?}")).collect();
+        Some(format!("{took:.1?} ({})", steps.join(", ")))
+    }
+}
+
+/// What ended the wait at the top of a scheduler pass.
+enum Woke {
+    Done(Done),
+    Job(Job),
+    Tick,
+}
+
 impl Scheduler {
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -605,24 +652,45 @@ impl Scheduler {
             if *stop.borrow() {
                 break;
             }
-            tokio::select! {
-                r = stop.changed() => if r.is_err() { break },
-                Some(d) = done_rx.recv() => self.finish(d),
+            let woke = tokio::select! {
+                r = stop.changed() => if r.is_err() { break } else { Woke::Tick },
+                Some(d) = done_rx.recv() => Woke::Done(d),
                 j = jobs.recv() => match j {
-                    Some(j) => self.accept(j),
+                    Some(j) => Woke::Job(j),
                     None => break,
                 },
-                _ = tick.tick() => {}
+                _ = tick.tick() => Woke::Tick,
+            };
+            let mut pass = Pass::new();
+            match woke {
+                Woke::Done(d) => self.finish(d),
+                Woke::Job(j) => self.accept(j),
+                Woke::Tick => {}
             }
+            // Everything that is ready goes now. One item per pass would let a
+            // slow pass hold thousands of answers, and their sockets, and fill
+            // the certificate queue until ingest drops names.
+            while let Ok(d) = done_rx.try_recv() {
+                self.finish(d);
+            }
+            pass.step("finish");
+            for _ in 0..JOBS_PER_PASS {
+                let Ok(j) = jobs.try_recv() else { break };
+                self.accept(j);
+            }
+            pass.step("accept");
             if last_sync.elapsed() >= SYNC {
                 self.sync();
                 last_sync = Instant::now();
             }
+            pass.step("sync");
             self.dispatch(&done_tx);
+            pass.step("dispatch");
             if last_pub.elapsed() >= PUBLISH {
                 self.publish();
                 last_pub = Instant::now();
             }
+            pass.step("publish");
             if last_min.elapsed() >= self.opts.minute {
                 self.emit_minute();
                 last_min = Instant::now();
@@ -630,6 +698,15 @@ impl Scheduler {
             if last_snap.elapsed() >= self.opts.snapshot_every {
                 self.save();
                 last_snap = Instant::now();
+            }
+            pass.step("save");
+            if let Some(slow) = pass.slow() {
+                // Probing waits while a pass runs, so this names what held it up.
+                tracing::warn!(
+                    "DNS scheduler pass took {slow}; {} in flight, {} waiting",
+                    self.in_flight,
+                    self.queue.len()
+                );
             }
         }
         // Names taken out but not probed go back, so a restart misses none.
@@ -652,9 +729,13 @@ impl Scheduler {
     /// Writes new waiting names and tops up the due ones for the next second.
     fn sync(&mut self) {
         let want = ((self.rate * 2.0) as usize).max(16).saturating_sub(self.due.len());
-        match self.queue.sync(now_ms(), want) {
-            Ok(got) => {
+        match self.queue.sync(now_ms(), want).and_then(|got| Ok((got, self.queue.trim(self.cfg.queue_max)?))) {
+            Ok((got, dropped)) => {
                 self.due.extend(got);
+                self.report.dropped_full += dropped.len() as u64;
+                for key in dropped {
+                    self.active.remove(&key);
+                }
                 self.report.queue_error = None;
             }
             Err(e) => {
@@ -983,6 +1064,16 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_slow_pass_names_the_step_that_held_it_up() {
+        let now = Instant::now();
+        let ms = Duration::from_millis;
+        let slow = Pass { start: now - ms(2_300), last: now, steps: vec![("finish", ms(300)), ("sync", ms(2_000))] };
+        assert_eq!(slow.slow().as_deref(), Some("2.3s (finish 300.0ms, sync 2.0s)"));
+        let fast = Pass { start: now - ms(900), last: now, steps: vec![("sync", ms(900))] };
+        assert_eq!(fast.slow(), None);
+    }
 
     #[test]
     fn sampling_is_stable_and_near_the_rate() {
