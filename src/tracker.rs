@@ -183,34 +183,29 @@ impl Tracker {
         }
     }
 
-    /// Forgets the oldest half of a table, keeping its size.
+    /// Forgets the oldest half of a table, keeping its size: whole days, oldest
+    /// first, then as many of the cutoff day as are still needed. Counting them,
+    /// rather than choosing by a bit of the key, keeps working after earlier
+    /// evictions left only keys that share that bit.
     fn evict_half(&mut self, table: u8) {
         let t = &mut self.tables[table as usize];
-        let mut days: BTreeMap<u16, u64> = BTreeMap::new();
+        let mut days: BTreeMap<u16, usize> = BTreeMap::new();
         for d in t.values() {
             *days.entry(u16::from_le_bytes(*d)).or_default() += 1;
         }
-        let target = t.len() as u64 / 2;
-        let (mut removed, mut cutoff) = (0, 0);
-        for (d, n) in days {
-            removed += n;
-            cutoff = d;
-            if removed >= target {
-                break;
-            }
-        }
-        let by_day = removed < t.len() as u64;
+        let (cutoff, mut need) = crate::dns::state::cutoff_day(days, t.len() / 2);
         // Rebuilt, not filtered in place: tombstones would count as occupied and
         // force the very doubling this avoids.
         let capacity = t.capacity() - 1;
         let mut kept = Table::with_capacity_and_hasher(capacity, Default::default());
-        kept.extend(t.drain().filter(|(k, d)| {
-            // All of one day means nothing is older, so an arbitrary half goes.
-            if by_day {
-                u16::from_le_bytes(*d) > cutoff
-            } else {
-                k[0] & 1 == 0
+        kept.extend(t.drain().filter(|(_, d)| match u16::from_le_bytes(*d).cmp(&cutoff) {
+            std::cmp::Ordering::Less => false,
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Equal if need > 0 => {
+                need -= 1;
+                false
             }
+            std::cmp::Ordering::Equal => true,
         }));
         *t = kept;
     }
@@ -419,6 +414,32 @@ impl Tracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn evict_half_halves_one_day_of_keys_that_share_a_low_bit() {
+        let d = tempfile::tempdir().unwrap();
+        let mut t = Tracker::open(d.path(), 1 << 30, 0).unwrap();
+        // Survivors of an eviction by key bit: every key has the same low bit.
+        for k in 0..10_000u64 {
+            t.tables[NAMES as usize].insert((k * 2).to_le_bytes(), 100u16.to_le_bytes());
+        }
+        t.evict_half(NAMES);
+        assert_eq!(t.tables[NAMES as usize].len(), 5_000);
+    }
+
+    #[test]
+    fn evict_half_takes_older_days_first() {
+        let d = tempfile::tempdir().unwrap();
+        let mut t = Tracker::open(d.path(), 1 << 30, 0).unwrap();
+        for k in 0..10_000u64 {
+            let day: u16 = if k < 1_000 { 99 } else { 100 };
+            t.tables[NAMES as usize].insert((k * 2).to_le_bytes(), day.to_le_bytes());
+        }
+        t.evict_half(NAMES);
+        let names = &t.tables[NAMES as usize];
+        assert_eq!(names.len(), 5_000);
+        assert!(names.values().all(|d| u16::from_le_bytes(*d) == 100), "day 99 goes first");
+    }
 
     #[test]
     fn table_bytes_is_never_below_the_real_allocation() {

@@ -290,28 +290,43 @@ impl LastAnswers {
         self.map.allocation_size() as u64
     }
 
-    /// Forgets the oldest half by day; within one day, an arbitrary half.
+    /// Forgets the oldest half: whole days, oldest first, then as many of the
+    /// cutoff day as are still needed. Counting them, rather than choosing by a
+    /// bit of the key, keeps working after earlier evictions left only keys
+    /// that share that bit.
     fn evict_half(&mut self) {
         let mut days: BTreeMap<u16, usize> = BTreeMap::new();
         for v in self.map.values() {
             *days.entry(v.day).or_default() += 1;
         }
-        let target = self.map.len() / 2;
-        let (mut removed, mut cutoff) = (0, 0);
-        for (d, n) in days {
-            removed += n;
-            cutoff = d;
-            if removed >= target {
-                break;
-            }
-        }
-        let by_day = removed < self.map.len();
+        let (cutoff, mut need) = cutoff_day(days, self.map.len() / 2);
         // Rebuilt rather than filtered in place: tombstones would count as
         // occupied and make the next insert double the table.
         let mut kept = HashMap::with_capacity(self.max_len);
-        kept.extend(self.map.drain().filter(|(k, v)| if by_day { v.day > cutoff } else { k & 1 == 0 }));
+        kept.extend(self.map.drain().filter(|(_, v)| match v.day.cmp(&cutoff) {
+            std::cmp::Ordering::Less => false,
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Equal if need > 0 => {
+                need -= 1;
+                false
+            }
+            std::cmp::Ordering::Equal => true,
+        }));
         self.map = kept;
     }
+}
+
+/// The day up to which entries go, and how many of that day go, so that at
+/// least `target` are removed oldest first: every earlier day goes whole.
+pub(crate) fn cutoff_day(days: BTreeMap<u16, usize>, target: usize) -> (u16, usize) {
+    let mut removed = 0;
+    for (day, n) in days {
+        if removed + n >= target {
+            return (day, target - removed);
+        }
+        removed += n;
+    }
+    (u16::MAX, 0)
 }
 
 #[cfg(test)]
@@ -401,5 +416,37 @@ mod tests {
         assert!(s.bytes_used() <= 128 * 1024, "{}", s.bytes_used());
         assert!(s.get(cap as u64 * 3 - 1).is_some(), "newest kept");
         assert!(s.get(0).is_none(), "oldest forgotten");
+    }
+
+    #[test]
+    fn eviction_within_one_day_halves_keys_that_share_a_low_bit() {
+        // Survivors of an eviction by key bit all share that bit; one day's
+        // names must still be halved, or every put rebuilds the map for nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = LastAnswers::open(&dir.path().join("s"), 128 * 1024);
+        let cap = s.max_len as u64;
+        let l = Last::of(&lookup(&["192.0.2.1"], &[], &[]), 7);
+        for i in 0..cap {
+            s.put(i * 2, l);
+        }
+        assert_eq!(s.len() as u64, cap);
+        s.put(cap * 2 + 2, l);
+        assert!(s.len() as u64 <= cap / 2 + 1, "{} of {cap} left", s.len());
+        assert!(s.get(cap * 2 + 2).is_some(), "the new answer is kept");
+    }
+
+    #[test]
+    fn eviction_drops_older_days_before_any_of_the_newest() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = LastAnswers::open(&dir.path().join("s"), 128 * 1024);
+        let cap = s.max_len as u64;
+        let l = Last::of(&lookup(&["192.0.2.1"], &[], &[]), 0);
+        // A tenth of the names from day 1, the rest from day 2.
+        for i in 0..cap {
+            s.put(i * 2, Last { day: if i < cap / 10 { 1 } else { 2 }, ..l });
+        }
+        s.put(cap * 2 + 2, Last { day: 2, ..l });
+        assert!(s.len() as u64 <= cap / 2 + 1, "{} of {cap} left", s.len());
+        assert!(s.get(0).is_none(), "an answer of the older day is forgotten first");
     }
 }
