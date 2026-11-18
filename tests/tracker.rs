@@ -220,6 +220,52 @@ fn eviction_respects_cap() {
 }
 
 #[test]
+fn eviction_keeps_names_when_dedup_alone_is_over_the_cap() {
+    let d = tempfile::tempdir().unwrap();
+    // Far below what dedup holds: no eviction of names can bring usage under it.
+    let cap = 64 << 10;
+    let mut t = Tracker::open(d.path(), 1 << 30, 0).unwrap();
+    for i in 0..20_000u32 {
+        let name = format!("n{i}.example.com");
+        t.observe(meta(0), &cert(&format!("{i:x}"), &[&name]), 100 + (i / 1000) as u16);
+    }
+    t.commit_wal(1).unwrap();
+    t.snapshot(1).unwrap();
+    drop(t);
+    let mut t = Tracker::open(d.path(), cap, 1).unwrap();
+    t.commit_wal(2).unwrap();
+    // Dedup expires by itself; wiping every name for it would forget all renewals.
+    let r = t.observe(meta(0), &cert("f1", &["n19999.example.com"]), 130).row.unwrap();
+    assert_ne!(r.renewal, RenewalClass::New);
+    let r = t.observe(meta(0), &cert("f2", &["n0.example.com"]), 130).row.unwrap();
+    assert_ne!(r.renewal, RenewalClass::New);
+}
+
+#[test]
+fn eviction_on_open_drops_only_the_oldest_days_needed() {
+    let d = tempfile::tempdir().unwrap();
+    let mut t = Tracker::open(d.path(), 1 << 30, 0).unwrap();
+    for i in 0..20_000u32 {
+        let name = format!("n{i}.example.com");
+        t.observe(meta(0), &cert(&format!("{i:x}"), &[&name]), 100 + (i / 1000) as u16);
+    }
+    t.commit_wal(1).unwrap();
+    t.snapshot(1).unwrap();
+    let before = t.bytes_used();
+    let names = t.name_count();
+    drop(t);
+    // Room for the tables at about half their size: the newer half stays.
+    let cap = before / 2 + (before / 4);
+    let mut t = Tracker::open(d.path(), cap, 1).unwrap();
+    assert!(t.bytes_used() <= cap, "{} > {cap}", t.bytes_used());
+    assert!(t.name_count() >= names / 4, "kept {} of {names}", t.name_count());
+    let r = t.observe(meta(0), &cert("f1", &["n19999.example.com"]), 130).row.unwrap();
+    assert_ne!(r.renewal, RenewalClass::New);
+    let r = t.observe(meta(0), &cert("f2", &["n0.example.com"]), 130).row.unwrap();
+    assert_eq!(r.renewal, RenewalClass::New);
+}
+
+#[test]
 fn table_growth_stays_under_cap_without_commits() {
     let d = tempfile::tempdir().unwrap();
     let cap = 3 << 20;
