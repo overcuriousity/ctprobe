@@ -255,7 +255,7 @@ async fn versioned_assets_are_cached_for_good_and_others_revalidate() {
 
 /// Runs a query on the engine and gives the result as the JSON it serialises to.
 async fn sql(a: &App, q: &str) -> serde_json::Value {
-    serde_json::to_value(a.engine.sql(q, 1000).await.unwrap()).unwrap()
+    serde_json::to_value(a.engine.internal(q.to_string(), 1000, None, None).await.unwrap()).unwrap()
 }
 
 /// Waits until `n` entries are readable, not merely received: commits run on a

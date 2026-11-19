@@ -22,7 +22,6 @@ pub fn error(code: StatusCode, msg: impl ToString) -> Response {
 
 pub fn query_error(e: QueryError) -> Response {
     let code = match e {
-        QueryError::NotAllowed(_) => StatusCode::BAD_REQUEST,
         QueryError::Timeout => StatusCode::GATEWAY_TIMEOUT,
         QueryError::Failed(_) => StatusCode::BAD_REQUEST,
     };

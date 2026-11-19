@@ -80,40 +80,18 @@ async fn seed(dir: &Path) -> QueryEngine {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sql_rejects_ddl_and_copy() {
-    let d = tempfile::tempdir().unwrap();
-    let e = seed(d.path()).await;
-    let out = d.path().join("evil.parquet");
-    for q in [
-        format!("COPY certs TO '{}'", out.display()),
-        "CREATE EXTERNAL TABLE x STORED AS CSV LOCATION '/etc/passwd'".to_string(),
-        "INSERT INTO certs VALUES (1)".to_string(),
-        "DROP TABLE certs".to_string(),
-        "SET datafusion.execution.batch_size = 1".to_string(),
-        "SELECT 1; SELECT 2".to_string(),
-    ] {
-        assert!(matches!(e.sql(&q, 10).await, Err(QueryError::NotAllowed(_))), "{q}");
-    }
-    assert!(!out.exists());
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn sql_cannot_read_files() {
-    let d = tempfile::tempdir().unwrap();
-    let e = seed(d.path()).await;
-    assert!(e.sql("SELECT * FROM '/etc/passwd'", 10).await.is_err());
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn sql_returns_rows_and_marks_truncation() {
     let d = tempfile::tempdir().unwrap();
     let e = seed(d.path()).await;
-    let r = e.sql("SELECT primary_domain, san_count FROM certs ORDER BY 1, 2", 3).await.unwrap();
+    let r = e
+        .internal("SELECT primary_domain, san_count FROM certs ORDER BY 1, 2".to_string(), 3, None, None)
+        .await
+        .unwrap();
     assert_eq!(r.columns, ["primary_domain", "san_count"]);
     assert_eq!(r.rows.len(), 3);
     assert!(r.truncated);
     assert_eq!(r.rows[0][0], serde_json::json!("example.com"));
-    let r = e.sql("SELECT COUNT(*) AS n FROM certs", 3).await.unwrap();
+    let r = e.internal("SELECT COUNT(*) AS n FROM certs".to_string(), 3, None, None).await.unwrap();
     assert_eq!(r.rows[0][0], serde_json::json!(9));
     assert!(!r.truncated);
 }
@@ -124,7 +102,7 @@ async fn sql_timeout_applies() {
     let mut e = seed(d.path()).await;
     e.set_timeout(std::time::Duration::from_millis(1));
     let q = "SELECT COUNT(*) FROM generate_series(1, 2000000000) a, generate_series(1, 1000) b";
-    assert!(matches!(e.sql(q, 10).await, Err(QueryError::Timeout)));
+    assert!(matches!(e.internal(q.to_string(), 10, None, None).await, Err(QueryError::Timeout)));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -224,7 +202,7 @@ async fn empty_store_works() {
     let d = tempfile::tempdir().unwrap();
     let e = QueryEngine::open(d.path()).unwrap();
     assert!(e.search_domains("x.com", Mode::Exact, 10).await.unwrap().is_empty());
-    let r = e.sql("SELECT COUNT(*) FROM certs", 10).await.unwrap();
+    let r = e.internal("SELECT COUNT(*) FROM certs".to_string(), 10, None, None).await.unwrap();
     assert_eq!(r.rows[0][0], serde_json::json!(0));
 }
 
@@ -260,6 +238,6 @@ async fn minute_files_from_before_the_backlog_columns_still_read() {
     let f = d.path().join("rollup_minute/day=2024-10-04/part-old.parquet");
     ctprobe::store::write_batch(&f, &b, None).unwrap();
     let e = QueryEngine::open(d.path()).unwrap();
-    let r = e.sql("SELECT entries, backlog FROM rollup_minute", 10).await.unwrap();
+    let r = e.internal("SELECT entries, backlog FROM rollup_minute".to_string(), 10, None, None).await.unwrap();
     assert_eq!(r.rows[0], [serde_json::json!(5), serde_json::Value::Null]);
 }

@@ -721,7 +721,7 @@ impl Scheduler {
             tracing::warn!("saving DNS queue: {e:#}");
         }
         self.emit_minute();
-        self.last.settle();
+        self.last.stop();
         self.save();
     }
 

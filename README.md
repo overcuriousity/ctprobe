@@ -62,7 +62,7 @@ Then start it:
 | `[dns] resolver` | Recursive resolver for DNS probing, such as `"127.0.0.1:5335"`. Without it, nothing is probed |
 | `[dns] max_qps` | Queries per second to the resolver, default 2000. Each probe sends two, A and AAAA. Names that do not fit in a burst are skipped and counted |
 | `[dns] sample_pct` | Percent of names probed, default 100. Chosen by a hash of the name, so the same names are probed on every certificate |
-| `[dns] state_max` | Disk cap for the last answer per name, default `2GiB`, about 19 million names. Over it, the oldest half is forgotten and their changes go undetected |
+| `[dns] state_max` | Approximate disk cap for the last answer per name, default `2GiB`. It is applied as a count, about 19 million names at the default. Over it, the oldest half is forgotten and their changes go undetected. Their space is freed some time later, so the size on disk can stay above the cap for a while |
 | `[dns] queue_max` | Names waiting for a later probe, default 20000000 (about 2.5 GiB on disk). Over it, the names seen longest ago are dropped, counted as `dropped_full`, and get no further probes |
 
 DNS probing asks each name when its certificate is seen and, while it has no address, again from

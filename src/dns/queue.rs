@@ -257,10 +257,16 @@ impl Queue {
         for row in self.by_seen.range(self.seen_from.to_be_bytes()..).take(excess) {
             let (k, v) = row.into_inner()?;
             let (Some((seen, key)), Some(due)) = (split(&k), u64_of(&v)) else { continue };
-            batch.remove(&self.by_seen, k);
-            batch.remove(&self.waiting, pair(due, key).to_be_bytes());
-            dropped.push(key);
+            let at = pair(due, key).to_be_bytes();
             last = Some(pair(seen, key));
+            batch.remove(&self.by_seen, k);
+            // A name whose stored form could not be read left this row
+            // behind when it was taken; it is not waiting and not counted.
+            if !self.waiting.contains_key(at)? {
+                continue;
+            }
+            batch.remove(&self.waiting, at);
+            dropped.push(key);
         }
         let len = self.len - dropped.len() as u64;
         batch.insert(&self.meta, LEN, len.to_be_bytes());
@@ -359,5 +365,20 @@ mod tests {
         assert_eq!(q.sync(5_000, 10).unwrap().len(), 1);
         assert_eq!(q.trim(0).unwrap(), vec![2]);
         assert!(q.is_empty());
+    }
+
+    #[test]
+    fn trim_does_not_count_a_sighting_row_without_a_waiting_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut q = Queue::open(&open_db(&dir.path().join("kv")).unwrap()).unwrap();
+        q.push(1_000, seen("a.example", 1, 100));
+        q.push(2_000, seen("b.example", 2, 200));
+        q.sync(0, 0).unwrap();
+        // Left behind by a name that was taken but could not be read.
+        q.by_seen.insert(pair(50, 9).to_be_bytes(), 500u64.to_be_bytes()).unwrap();
+        assert_eq!(q.trim(1).unwrap(), Vec::<u64>::new());
+        assert_eq!(q.len(), 2);
+        assert_eq!(q.trim(1).unwrap(), vec![1]);
+        assert_eq!(q.len(), 1);
     }
 }

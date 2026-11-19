@@ -1009,7 +1009,6 @@ dependencies = [
  "sd-notify",
  "serde",
  "serde_json",
- "sqlparser",
  "strsim",
  "tempfile",
  "thiserror",

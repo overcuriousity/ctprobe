@@ -9,6 +9,11 @@ use chrono::NaiveDate;
 use fjall::Keyspace;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
+use std::sync::Mutex;
+
+/// Held for each read-then-write of an entry, so that expiry cannot remove an
+/// entry that probing has just renewed.
+static WRITE: Mutex<()> = Mutex::new(());
 
 #[derive(Clone)]
 pub struct IpIndex {
@@ -46,6 +51,7 @@ impl IpIndex {
         for ip in ips {
             let mut key = prefix(ip).to_vec();
             key.extend_from_slice(domain.as_bytes());
+            let _held = WRITE.lock().unwrap_or_else(|e| e.into_inner());
             let (first, last) = match self.table.get(&key)?.and_then(|v| days(&v)) {
                 Some((first, last)) if (first..=last).contains(&day) => continue,
                 Some((first, last)) => (first.min(day), last.max(day)),
@@ -85,7 +91,13 @@ impl IpIndex {
         let mut removed = 0;
         for row in self.table.iter() {
             let (k, v) = row.into_inner()?;
-            if days(&v).is_none_or(|(_, last)| last < day) {
+            let old = |v: &[u8]| days(v).is_none_or(|(_, last)| last < day);
+            if !old(&v) {
+                continue;
+            }
+            // The scan reads a view from its start; the entry may be newer by now.
+            let _held = WRITE.lock().unwrap_or_else(|e| e.into_inner());
+            if self.table.get(&k)?.is_some_and(|v| old(&v)) {
                 self.table.remove(k)?;
                 removed += 1;
             }

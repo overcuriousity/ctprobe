@@ -10,7 +10,7 @@ use anyhow::Result;
 use fjall::Keyspace;
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use xxhash_rust::xxh3::xxh3_64;
@@ -174,6 +174,8 @@ pub struct LastAnswers {
     len: Arc<AtomicU64>,
     max_len: u64,
     evicting: Option<JoinHandle<()>>,
+    /// Set at shutdown: a running eviction ends at its next answer.
+    stop: Arc<AtomicBool>,
 }
 
 fn encode(v: &Last) -> [u8; RECORD] {
@@ -231,7 +233,10 @@ fn day_of(b: &[u8]) -> u16 {
 }
 
 impl LastAnswers {
-    /// Opens the answers in `db`, keeping at most what fits in `max_bytes` on disk.
+    /// Opens the answers in `db`, keeping about what fits in `max_bytes` on
+    /// disk. The cap is applied as a number of answers of `ENTRY_BYTES` each,
+    /// and forgotten answers free their space only when the store compacts, so
+    /// the size on disk can stay above `max_bytes` for a while after an eviction.
     pub fn open(db: &Db, max_bytes: u64) -> Result<LastAnswers> {
         let table = keyspace(db, "dns_last")?;
         let meta = keyspace(db, "meta")?;
@@ -242,7 +247,14 @@ impl LastAnswers {
             None => table.len()? as u64,
         };
         let max_len = (max_bytes / ENTRY_BYTES).max(16);
-        Ok(LastAnswers { table, meta, len: Arc::new(AtomicU64::new(len)), max_len, evicting: None })
+        Ok(LastAnswers {
+            table,
+            meta,
+            len: Arc::new(AtomicU64::new(len)),
+            max_len,
+            evicting: None,
+            stop: Arc::default(),
+        })
     }
 
     /// Writes the count. The answers themselves are written as they change.
@@ -268,7 +280,7 @@ impl LastAnswers {
             return tracing::warn!("writing DNS state: {e}");
         }
         if !known && self.len.fetch_add(1, Ordering::Relaxed) + 1 > self.max_len {
-            self.evict();
+            self.evict(key);
         }
     }
 
@@ -286,13 +298,14 @@ impl LastAnswers {
 
     /// Starts forgetting the oldest half, unless that is already running. It
     /// runs beside probing: scanning tens of millions of answers takes a while.
-    fn evict(&mut self) {
+    /// The answer of `keep`, whose writing started this, stays.
+    fn evict(&mut self, keep: u64) {
         if self.evicting.as_ref().is_some_and(|h| !h.is_finished()) {
             return;
         }
-        let (table, len) = (self.table.clone(), self.len.clone());
+        let (table, len, stop) = (self.table.clone(), self.len.clone(), self.stop.clone());
         let spawned = std::thread::Builder::new().name("ctprobe-dns-evict".into()).spawn(move || {
-            if let Err(e) = evict_half(&table, &len) {
+            if let Err(e) = evict_half(&table, &len, keep, &stop) {
                 tracing::warn!("evicting DNS state: {e:#}");
             }
         });
@@ -303,7 +316,17 @@ impl LastAnswers {
     }
 
     /// Waits for a running eviction.
-    pub fn settle(&mut self) {
+    #[cfg(test)]
+    fn settle(&mut self) {
+        if let Some(h) = self.evicting.take() {
+            let _ = h.join();
+        }
+    }
+
+    /// Ends a running eviction where it is, for shutdown. What it has not
+    /// forgotten yet stays until the cap is reached again.
+    pub fn stop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
         if let Some(h) = self.evicting.take() {
             let _ = h.join();
         }
@@ -312,12 +335,17 @@ impl LastAnswers {
 
 /// Forgets the oldest half: whole days, oldest first, then as many of the
 /// cutoff day as are still needed. An answer rewritten while this runs may be
-/// forgotten with its old day; it then reads as unknown once.
-fn evict_half(table: &Keyspace, len: &AtomicU64) -> Result<()> {
+/// forgotten with its old day; it then reads as unknown once. The answer of
+/// `keep` is not forgotten. Ends early once `stop` is set.
+fn evict_half(table: &Keyspace, len: &AtomicU64, keep: u64, stop: &AtomicBool) -> Result<()> {
+    let stopped = || stop.load(Ordering::Relaxed);
     let before = len.load(Ordering::Relaxed);
     let mut days: BTreeMap<u16, usize> = BTreeMap::new();
     let mut count = 0u64;
     for row in table.iter() {
+        if stopped() {
+            return Ok(());
+        }
         let v = row.value()?;
         if v.len() == RECORD {
             *days.entry(day_of(&v)).or_default() += 1;
@@ -326,8 +354,18 @@ fn evict_half(table: &Keyspace, len: &AtomicU64) -> Result<()> {
     }
     let (cutoff, mut need) = cutoff_day(days, (count / 2) as usize);
     let mut removed = 0u64;
+    let keep = keep.to_be_bytes();
     for row in table.iter() {
+        if stopped() {
+            // The scan is not complete, so the count is lowered, not corrected.
+            len.store(len.load(Ordering::Relaxed).saturating_sub(removed), Ordering::Relaxed);
+            tracing::info!("DNS state: eviction ended by shutdown after forgetting {removed} answers");
+            return Ok(());
+        }
         let (k, v) = row.into_inner()?;
+        if *k == keep {
+            continue;
+        }
         let go = v.len() != RECORD
             || match day_of(&v).cmp(&cutoff) {
                 std::cmp::Ordering::Less => true,
@@ -469,11 +507,27 @@ mod tests {
         let cap = s.max_len;
         let l = Last::of(&lookup(&["192.0.2.1"], &[], &[]), 7);
         for i in 0..cap {
-            put(&mut s, i * 2, l);
+            put(&mut s, i * 2 + 2, l);
         }
         assert_eq!(s.len() as u64, cap);
-        put(&mut s, cap * 2 + 2, l);
+        // The lowest key of all, so an eviction in key order would take it first.
+        put(&mut s, 0, l);
         assert!(s.len() as u64 <= cap / 2 + 1, "{} of {cap} left", s.len());
+        assert!(s.get(0).is_some(), "the new answer is kept");
+    }
+
+    #[test]
+    fn a_stopped_eviction_forgets_nothing_more_and_keeps_the_count_right() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir, 128 * 1024);
+        let l = Last::of(&lookup(&["192.0.2.1"], &[], &[]), 7);
+        for i in 0..100 {
+            s.table.insert((i as u64).to_be_bytes(), encode(&l)).unwrap();
+        }
+        s.len.store(100, Ordering::Relaxed);
+        s.stop.store(true, Ordering::Relaxed);
+        evict_half(&s.table, &s.len, 0, &s.stop).unwrap();
+        assert_eq!((s.len(), s.table.len().unwrap()), (100, 100));
     }
 
     #[test]
