@@ -7,6 +7,7 @@
 
 use crate::config::Config;
 use crate::coverage;
+use crate::dns::ipindex::{oldest_dns_day, IpIndex};
 use crate::dns::outcome::Status;
 use crate::dns::queue::Kind;
 use crate::dns::{self, DnsLink, DnsOpts, DnsOut, DnsStats};
@@ -96,6 +97,8 @@ pub struct PipelineHandle {
     pub registry: Arc<Registry>,
     /// Present while DNS probing is configured.
     pub dns: Option<Arc<DnsStats>>,
+    /// Domains per address, written by DNS probing.
+    pub ips: IpIndex,
 }
 
 const RUN: u8 = 0;
@@ -200,10 +203,11 @@ fn coverage_loop(live: Arc<LiveState>, data: PathBuf, every: Duration, stop: wat
 impl Pipeline {
     pub async fn start(cfg: Config, opts: PipelineOpts) -> Result<Pipeline> {
         std::fs::create_dir_all(&cfg.data_dir)?;
-        let db = open_db(&cfg.data_dir.join("state.redb"))?;
-        let positions = Positions::new(db.clone());
+        let db = open_db(&cfg.data_dir.join(crate::kv::DIR))?;
+        let positions = Positions::new(db.clone())?;
         let epoch = positions.epoch()?;
-        let registry = Arc::new(Registry::open(db)?);
+        let registry = Arc::new(Registry::open(db.clone())?);
+        let ips = IpIndex::open(&db)?;
         nightly::cleanup(&cfg.data_dir)?;
         let _ = std::fs::remove_dir_all(cfg.data_dir.join("tmp"));
         let writer = Writer::open(&cfg.data_dir, epoch)?;
@@ -230,7 +234,7 @@ impl Pipeline {
         let (stop, stop_rx) = watch::channel(false);
         let tasks = Arc::new(Mutex::new(Vec::new()));
         let (dns_link, dns_thread) = if cfg.dns.enabled() {
-            let (l, t) = dns::start(cfg.dns.clone(), opts.dns.clone(), &cfg.data_dir, stop.subscribe())?;
+            let (l, t) = dns::start(cfg.dns.clone(), opts.dns.clone(), &db, stop.subscribe())?;
             tracing::info!(
                 "probing names via the DNS resolver at {}",
                 cfg.dns.resolver.map(|r| r.to_string()).unwrap_or_default()
@@ -276,6 +280,7 @@ impl Pipeline {
 
         if opts.nightly {
             let cfg2 = cfg.clone();
+            let ips2 = ips.clone();
             let t = tokio::spawn(async move {
                 loop {
                     let today = chrono::Utc::now().date_naive();
@@ -283,6 +288,15 @@ impl Pipeline {
                         tracing::info!("nightly job for {day}");
                         if let Err(e) = nightly::run_nightly(&cfg2, day).await {
                             tracing::error!("nightly job for {day} failed: {e:#}");
+                        }
+                    }
+                    // The address index keeps what the DNS rows still back.
+                    if let Some(oldest) = oldest_dns_day(&cfg2.data_dir) {
+                        let ips = ips2.clone();
+                        match tokio::task::spawn_blocking(move || ips.expire(oldest)).await {
+                            Ok(Ok(n)) if n > 0 => tracing::info!("address index: forgot {n} expired entries"),
+                            Ok(Err(e)) => tracing::warn!("expiring the address index: {e:#}"),
+                            _ => {}
                         }
                     }
                     tokio::time::sleep(until_next_nightly(chrono::Utc::now())).await;
@@ -327,7 +341,7 @@ impl Pipeline {
         let thread = std::thread::Builder::new().name("ctprobe-pipeline".into()).spawn(move || ctx.run())?;
 
         Ok(Pipeline {
-            handle: PipelineHandle { live, feed, registry, dns: dns_stats },
+            handle: PipelineHandle { live, feed, registry, dns: dns_stats, ips },
             stop,
             mode,
             thread: Some(thread),

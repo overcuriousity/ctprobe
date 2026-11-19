@@ -75,20 +75,6 @@ pub async fn history(State(s): State<AppState>, Query(q): Query<HistoryQuery>) -
 }
 
 #[derive(Deserialize)]
-pub struct SqlQuery {
-    q: String,
-    limit: Option<usize>,
-    format: Option<String>,
-}
-
-pub async fn sql(State(s): State<AppState>, Query(q): Query<SqlQuery>) -> Response {
-    match s.engine.sql(&q.q, limit(q.limit)).await {
-        Ok(r) => respond(r, q.format.as_deref()),
-        Err(e) => query_error(e),
-    }
-}
-
-#[derive(Deserialize)]
 pub struct SearchQuery {
     q: String,
     mode: Option<String>,

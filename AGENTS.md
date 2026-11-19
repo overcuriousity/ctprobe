@@ -12,7 +12,7 @@ https://github.com/overcuriousity/overcuriousity-dev-manifest/tree/v2026.11.1/ma
 
 ## Where ctprobe differs, on purpose
 
-- No sign-in, sessions, tokens, SQLite or MCP: there are no users, and data lives in redb and Parquet.
+- No sign-in, sessions, tokens, SQLite or MCP: there are no users, and data lives in fjall (`<data>/kv`) and Parquet.
 - Pages are static shells filled by vanilla JS from JSON and SSE, with every value placed through `textContent`. No Askama or htmx.
 - Charts use the vendored uPlot.
 - The interface has a German toggle (`assets/i18n.js`); English is the source language.

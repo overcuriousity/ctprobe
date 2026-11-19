@@ -13,6 +13,7 @@ use std::time::Duration;
 struct App {
     base: String,
     pipe: Pipeline,
+    engine: Arc<QueryEngine>,
     log: MockLog,
     _dir: tempfile::TempDir,
 }
@@ -74,11 +75,11 @@ async fn app_with(log: MockLog, dns: ctprobe::config::DnsConfig) -> App {
     };
     let pipe = Pipeline::start(cfg, opts).await.unwrap();
     let engine = Arc::new(QueryEngine::open(dir.path()).unwrap());
-    let state = web::AppState::new(engine, pipe.handle.clone());
+    let state = web::AppState::new(engine.clone(), pipe.handle.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(web::serve(listener, state));
-    App { base, pipe, log, _dir: dir }
+    App { base, pipe, engine, log, _dir: dir }
 }
 
 fn certs(names: &[&str]) -> Vec<MockEntry> {
@@ -221,7 +222,7 @@ async fn pages_have_csp_and_render() {
 #[tokio::test(flavor = "multi_thread")]
 async fn pages_carry_no_inline_style_or_script() {
     let a = app(vec![], false).await;
-    for path in ["/", "/sizing", "/trends", "/search", "/sql", "/cert", "/domain", "/dns"] {
+    for path in ["/", "/sizing", "/trends", "/search", "/cert", "/domain", "/dns"] {
         let html = reqwest::get(format!("{}{path}", a.base)).await.unwrap().text().await.unwrap();
         assert!(!html.contains("style=") && !html.contains("<style"), "{path} has an inline style");
         assert!(!html.contains("<script>") && !html.contains(" onclick="), "{path} has an inline script");
@@ -252,13 +253,17 @@ async fn versioned_assets_are_cached_for_good_and_others_revalidate() {
     a.pipe.shutdown().await.unwrap();
 }
 
+/// Runs a query on the engine and gives the result as the JSON it serialises to.
+async fn sql(a: &App, q: &str) -> serde_json::Value {
+    serde_json::to_value(a.engine.sql(q, 1000).await.unwrap()).unwrap()
+}
+
 /// Waits until `n` entries are readable, not merely received: commits run on a
 /// timer, and a loaded machine can take far longer than any fixed sleep.
 async fn wait_rows(a: &App, n: u64) {
-    let url = format!("{}/api/sql?q=SELECT%20COUNT(*)%20AS%20n%20FROM%20sightings", a.base);
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
-            let v = get_json(url.clone()).await;
+            let v = sql(a, "SELECT COUNT(*) AS n FROM sightings").await;
             if v["rows"][0][0].as_u64().is_some_and(|c| c >= n) {
                 return;
             }
@@ -338,17 +343,7 @@ async fn cert_detail_fetches_from_mock_log() {
 #[tokio::test(flavor = "multi_thread")]
 async fn empty_store_renders() {
     let a = app(vec![], false).await;
-    for p in [
-        "/",
-        "/trends",
-        "/search",
-        "/sql",
-        "/sizing",
-        "/dns",
-        "/domain?d=example.com",
-        "/cert?log=0&index=0",
-        "/api/schema",
-    ] {
+    for p in ["/", "/trends", "/search", "/sizing", "/dns", "/domain?d=example.com", "/cert?log=0&index=0"] {
         assert_eq!(reqwest::get(format!("{}{p}", a.base)).await.unwrap().status(), 200, "{p}");
     }
     for m in web::trends::METRICS {
@@ -411,8 +406,7 @@ async fn minute_rollup_records_backlog() {
     let a = app(certs(&["a.example.com"]), false).await;
     wait_rows(&a, 1).await;
     let q = "SELECT raw_entries, backlog, limited_backlog, healthy_logs FROM rollup_minute WHERE log_id = 65535 ORDER BY raw_entries DESC";
-    let u = format!("{}/api/sql?q={}", a.base, q.replace(' ', "%20").replace('=', "%3D"));
-    let v = get_json(u).await;
+    let v = sql(&a, q).await;
     assert_eq!(v["rows"][0], serde_json::json!([1, 0, 0, 1]), "{v}");
     a.pipe.shutdown().await.unwrap();
 }
@@ -816,7 +810,7 @@ async fn dns_is_off_without_resolvers() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn dns_probes_reach_sql_api_and_trends() {
+async fn dns_probes_reach_the_store_the_apis_and_trends() {
     use ctprobe::dns::mock::{MockAnswer, MockDns};
     let dns = MockDns::start().await;
     dns.set("a.example.com", MockAnswer::addrs(&["192.0.2.1", "2001:db8::1"]));
@@ -825,14 +819,10 @@ async fn dns_probes_reach_sql_api_and_trends() {
     let log = MockLog::start(MockOpts::rfc6962(0).with_entries(entries)).await;
     let cfg = ctprobe::config::DnsConfig { resolver: Some(dns.addr()), ..Default::default() };
     let a = app_with(log, cfg).await;
-    let url = format!(
-        "{}/api/sql?q={}",
-        a.base,
-        "SELECT%20name%2C%20status%2C%20v4%2C%20v6%2C%20reg_domain%20FROM%20dns%20WHERE%20attempt%20%3D%200%20AND%20kind%20%3D%20%27name%27%20ORDER%20BY%20name"
-    );
+    let q = "SELECT name, status, v4, v6, reg_domain FROM dns WHERE attempt = 0 AND kind = 'name' ORDER BY name";
     let rows = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
-            let v = get_json(url.clone()).await;
+            let v = sql(&a, q).await;
             if v["rows"].as_array().is_some_and(|r| r.len() >= 2) {
                 return v["rows"].clone();
             }
@@ -861,6 +851,18 @@ async fn dns_probes_reach_sql_api_and_trends() {
     .await
     .expect("live DNS figures did not arrive");
     assert_eq!(v["enabled"], true);
+    // The address index answers which domains resolved to an address.
+    for ip in ["192.0.2.1", "2001:db8::1", "::ffff:192.0.2.1"] {
+        let v = get_json(format!("{}/api/v1/ip/{ip}", a.base)).await;
+        assert_eq!(v["rows"].as_array().map(Vec::len), Some(1), "{v}");
+        assert_eq!(v["rows"][0]["domain"], "example.com");
+        assert_eq!(v["rows"][0]["first_seen"], v["rows"][0]["last_seen"]);
+        assert!(v["next_cursor"].is_null());
+    }
+    let none = get_json(format!("{}/api/v1/ip/192.0.2.9", a.base)).await;
+    assert_eq!(none["rows"], serde_json::json!([]));
+    let bad = reqwest::get(format!("{}/api/v1/ip/nonsense", a.base)).await.unwrap();
+    assert_eq!(bad.status(), 400);
     assert_eq!(v["names"]["first"]["probes"], 2);
     assert_eq!(v["wildcards"]["first"]["probes"], 1);
     assert_eq!(v["bases"]["first"]["probes"], 1);

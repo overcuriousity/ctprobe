@@ -1,25 +1,27 @@
 //! The last conclusive answer per name, kept to tell whether DNS changed
 //! between certificates. It holds the first few addresses themselves and
 //! hashes of the full sets, so changes are exact even where not every address
-//! fits. Held in memory under a cap and saved as a snapshot; a crash loses
-//! what changed since the last one, which then reads as unknown.
+//! fits. Kept in the key-value store under a cap on its size; a crash loses
+//! the last moments of answers, which then read as unknown.
 
 use super::outcome::{Lookup, Status};
-use anyhow::{bail, Result};
-use hashbrown::HashMap;
+use crate::kv::{keyspace, u64_of, Db};
+use anyhow::Result;
+use fjall::Keyspace;
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::thread::JoinHandle;
 use xxhash_rust::xxh3::xxh3_64;
 
 pub const KEEP_V4: usize = 4;
 pub const KEEP_V6: usize = 2;
-const MAGIC: &[u8; 8] = b"CTPDNS02";
-const RECORD: usize = 8 + 8 + 16 + 2 + 3 + 4 * KEEP_V4 + 16 * KEEP_V6;
-/// Key, value and control byte of one table slot.
-const SLOT_BYTES: u64 = std::mem::size_of::<(u64, Last)>() as u64 + 1;
+const RECORD: usize = 8 + 16 + 2 + 3 + 4 * KEEP_V4 + 16 * KEEP_V6;
+/// Disk space of one answer with its key, as measured on 15 to 50 million.
+const ENTRY_BYTES: u64 = 110;
+/// Number of answers, saved now and then.
+const LEN: &[u8] = b"dns_last_len";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Last {
@@ -167,153 +169,185 @@ pub fn diff(prev: &Last, cur: &Last, l: &Lookup, today: u16) -> Diff {
 }
 
 pub struct LastAnswers {
-    path: PathBuf,
-    map: HashMap<u64, Last>,
-    max_len: usize,
+    table: Keyspace,
+    meta: Keyspace,
+    len: Arc<AtomicU64>,
+    max_len: u64,
+    evicting: Option<JoinHandle<()>>,
 }
 
-/// Entries that fit in `max_bytes` without the table growing past it.
-fn max_len(max_bytes: u64) -> usize {
-    let slots = (max_bytes / SLOT_BYTES).max(16);
-    let buckets = 1u64 << (63 - slots.leading_zeros());
-    (buckets / 8 * 7) as usize
+fn encode(v: &Last) -> [u8; RECORD] {
+    let mut b = [0u8; RECORD];
+    b[0..8].copy_from_slice(&v.exact.to_le_bytes());
+    for (i, x) in [v.v4_set, v.v6_set, v.cname, v.network].into_iter().enumerate() {
+        b[8 + i * 4..12 + i * 4].copy_from_slice(&x.to_le_bytes());
+    }
+    b[24..26].copy_from_slice(&v.day.to_le_bytes());
+    b[26..29].copy_from_slice(&[v.status, v.n4, v.n6]);
+    let mut at = 29;
+    for a in &v.v4 {
+        b[at..at + 4].copy_from_slice(a);
+        at += 4;
+    }
+    for a in &v.v6 {
+        b[at..at + 16].copy_from_slice(a);
+        at += 16;
+    }
+    b
+}
+
+fn decode(b: &[u8]) -> Option<Last> {
+    if b.len() != RECORD {
+        return None;
+    }
+    let u32_ = |i: usize| u32::from_le_bytes(b[i..i + 4].try_into().unwrap());
+    let mut l = Last {
+        exact: u64::from_le_bytes(b[0..8].try_into().unwrap()),
+        v4_set: u32_(8),
+        v6_set: u32_(12),
+        cname: u32_(16),
+        network: u32_(20),
+        day: day_of(b),
+        status: b[26],
+        n4: b[27],
+        n6: b[28],
+        v4: [[0; 4]; KEEP_V4],
+        v6: [[0; 16]; KEEP_V6],
+    };
+    let mut at = 29;
+    for s in l.v4.iter_mut() {
+        s.copy_from_slice(&b[at..at + 4]);
+        at += 4;
+    }
+    for s in l.v6.iter_mut() {
+        s.copy_from_slice(&b[at..at + 16]);
+        at += 16;
+    }
+    Some(l)
+}
+
+fn day_of(b: &[u8]) -> u16 {
+    u16::from_le_bytes([b[24], b[25]])
 }
 
 impl LastAnswers {
-    /// Loads `path` if it exists. An unreadable snapshot is set aside, not fatal.
-    pub fn open(path: &Path, max_bytes: u64) -> LastAnswers {
-        let mut s = LastAnswers { path: path.to_path_buf(), map: HashMap::new(), max_len: max_len(max_bytes) };
-        if path.exists() {
-            if let Err(e) = s.load() {
-                tracing::warn!("ignoring DNS state {}: {e:#}", path.display());
-                s.map.clear();
-            }
-        }
-        while s.map.len() > s.max_len {
-            s.evict_half();
-        }
-        s
+    /// Opens the answers in `db`, keeping at most what fits in `max_bytes` on disk.
+    pub fn open(db: &Db, max_bytes: u64) -> Result<LastAnswers> {
+        let table = keyspace(db, "dns_last")?;
+        let meta = keyspace(db, "meta")?;
+        // The count is saved now and then; after a crash it is a little off,
+        // which only moves the moment of the next eviction.
+        let len = match meta.get(LEN)?.and_then(|v| u64_of(&v)) {
+            Some(n) => n,
+            None => table.len()? as u64,
+        };
+        let max_len = (max_bytes / ENTRY_BYTES).max(16);
+        Ok(LastAnswers { table, meta, len: Arc::new(AtomicU64::new(len)), max_len, evicting: None })
     }
 
-    fn load(&mut self) -> Result<()> {
-        let mut r = BufReader::with_capacity(1 << 20, File::open(&self.path)?);
-        let mut magic = [0u8; 8];
-        r.read_exact(&mut magic)?;
-        if &magic != MAGIC {
-            bail!("bad magic");
-        }
-        let mut n = [0u8; 8];
-        r.read_exact(&mut n)?;
-        let count = u64::from_le_bytes(n) as usize;
-        self.map.reserve(count.min(self.max_len));
-        let mut rec = [0u8; RECORD];
-        for _ in 0..count {
-            r.read_exact(&mut rec)?;
-            let mut at = 0;
-            let mut take = |n: usize| {
-                let s = &rec[at..at + n];
-                at += n;
-                s.to_vec()
-            };
-            let u64_ = |b: Vec<u8>| u64::from_le_bytes(b.try_into().unwrap());
-            let u32_ = |b: Vec<u8>| u32::from_le_bytes(b.try_into().unwrap());
-            let key = u64_(take(8));
-            let mut l = Last {
-                exact: u64_(take(8)),
-                v4_set: u32_(take(4)),
-                v6_set: u32_(take(4)),
-                cname: u32_(take(4)),
-                network: u32_(take(4)),
-                day: u16::from_le_bytes(take(2).try_into().unwrap()),
-                status: take(1)[0],
-                n4: take(1)[0],
-                n6: take(1)[0],
-                v4: [[0; 4]; KEEP_V4],
-                v6: [[0; 16]; KEEP_V6],
-            };
-            for s in l.v4.iter_mut() {
-                s.copy_from_slice(&take(4));
-            }
-            for s in l.v6.iter_mut() {
-                s.copy_from_slice(&take(16));
-            }
-            self.map.insert(key, l);
-        }
-        Ok(())
-    }
-
+    /// Writes the count. The answers themselves are written as they change.
     pub fn save(&self) -> Result<()> {
-        let tmp = self.path.with_extension("snap.tmp");
-        let mut w = BufWriter::with_capacity(1 << 20, File::create(&tmp)?);
-        w.write_all(MAGIC)?;
-        w.write_all(&(self.map.len() as u64).to_le_bytes())?;
-        for (k, v) in &self.map {
-            w.write_all(&k.to_le_bytes())?;
-            w.write_all(&v.exact.to_le_bytes())?;
-            for x in [v.v4_set, v.v6_set, v.cname, v.network] {
-                w.write_all(&x.to_le_bytes())?;
-            }
-            w.write_all(&v.day.to_le_bytes())?;
-            w.write_all(&[v.status, v.n4, v.n6])?;
-            for a in &v.v4 {
-                w.write_all(a)?;
-            }
-            for a in &v.v6 {
-                w.write_all(a)?;
-            }
-        }
-        w.into_inner().map_err(|e| e.into_error())?.sync_all()?;
-        std::fs::rename(&tmp, &self.path)?;
+        self.meta.insert(LEN, self.len.load(Ordering::Relaxed).to_be_bytes())?;
         Ok(())
     }
 
     pub fn get(&self, key: u64) -> Option<Last> {
-        self.map.get(&key).copied()
+        match self.table.get(key.to_be_bytes()) {
+            Ok(v) => v.and_then(|v| decode(&v)),
+            Err(e) => {
+                tracing::warn!("reading DNS state: {e}");
+                None
+            }
+        }
     }
 
     pub fn put(&mut self, key: u64, last: Last) {
-        if self.map.len() >= self.max_len && !self.map.contains_key(&key) {
-            self.evict_half();
+        let k = key.to_be_bytes();
+        let known = self.table.contains_key(k).unwrap_or(false);
+        if let Err(e) = self.table.insert(k, encode(&last)) {
+            return tracing::warn!("writing DNS state: {e}");
         }
-        self.map.insert(key, last);
+        if !known && self.len.fetch_add(1, Ordering::Relaxed) + 1 > self.max_len {
+            self.evict();
+        }
     }
 
     pub fn len(&self) -> usize {
-        self.map.len()
+        self.len.load(Ordering::Relaxed) as usize
     }
 
     pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
+        self.len() == 0
     }
 
     pub fn bytes_used(&self) -> u64 {
-        self.map.allocation_size() as u64
+        self.table.disk_space()
     }
 
-    /// Forgets the oldest half: whole days, oldest first, then as many of the
-    /// cutoff day as are still needed. Counting them, rather than choosing by a
-    /// bit of the key, keeps working after earlier evictions left only keys
-    /// that share that bit.
-    fn evict_half(&mut self) {
-        let mut days: BTreeMap<u16, usize> = BTreeMap::new();
-        for v in self.map.values() {
-            *days.entry(v.day).or_default() += 1;
+    /// Starts forgetting the oldest half, unless that is already running. It
+    /// runs beside probing: scanning tens of millions of answers takes a while.
+    fn evict(&mut self) {
+        if self.evicting.as_ref().is_some_and(|h| !h.is_finished()) {
+            return;
         }
-        let (cutoff, mut need) = cutoff_day(days, self.map.len() / 2);
-        // Rebuilt rather than filtered in place: tombstones would count as
-        // occupied and make the next insert double the table.
-        let mut kept = HashMap::with_capacity(self.max_len);
-        kept.extend(self.map.drain().filter(|(_, v)| match v.day.cmp(&cutoff) {
-            std::cmp::Ordering::Less => false,
-            std::cmp::Ordering::Greater => true,
-            std::cmp::Ordering::Equal if need > 0 => {
-                need -= 1;
-                false
+        let (table, len) = (self.table.clone(), self.len.clone());
+        let spawned = std::thread::Builder::new().name("ctprobe-dns-evict".into()).spawn(move || {
+            if let Err(e) = evict_half(&table, &len) {
+                tracing::warn!("evicting DNS state: {e:#}");
             }
-            std::cmp::Ordering::Equal => true,
-        }));
-        self.map = kept;
+        });
+        match spawned {
+            Ok(h) => self.evicting = Some(h),
+            Err(e) => tracing::warn!("evicting DNS state: {e}"),
+        }
     }
+
+    /// Waits for a running eviction.
+    pub fn settle(&mut self) {
+        if let Some(h) = self.evicting.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+/// Forgets the oldest half: whole days, oldest first, then as many of the
+/// cutoff day as are still needed. An answer rewritten while this runs may be
+/// forgotten with its old day; it then reads as unknown once.
+fn evict_half(table: &Keyspace, len: &AtomicU64) -> Result<()> {
+    let before = len.load(Ordering::Relaxed);
+    let mut days: BTreeMap<u16, usize> = BTreeMap::new();
+    let mut count = 0u64;
+    for row in table.iter() {
+        let v = row.value()?;
+        if v.len() == RECORD {
+            *days.entry(day_of(&v)).or_default() += 1;
+        }
+        count += 1;
+    }
+    let (cutoff, mut need) = cutoff_day(days, (count / 2) as usize);
+    let mut removed = 0u64;
+    for row in table.iter() {
+        let (k, v) = row.into_inner()?;
+        let go = v.len() != RECORD
+            || match day_of(&v).cmp(&cutoff) {
+                std::cmp::Ordering::Less => true,
+                std::cmp::Ordering::Greater => false,
+                std::cmp::Ordering::Equal if need > 0 => {
+                    need -= 1;
+                    true
+                }
+                std::cmp::Ordering::Equal => false,
+            };
+        if go {
+            table.remove(k)?;
+            removed += 1;
+        }
+    }
+    // Also corrects a count that drifted after a crash.
+    let now = len.load(Ordering::Relaxed);
+    len.store((count + now.saturating_sub(before)).saturating_sub(removed), Ordering::Relaxed);
+    tracing::info!("DNS state at its cap: forgot the {removed} oldest answers of {count}");
+    Ok(())
 }
 
 /// The day up to which entries go, and how many of that day go, so that at
@@ -387,65 +421,72 @@ mod tests {
         assert_eq!(Last::of(&r(&many), 1).v4().len(), KEEP_V4);
     }
 
+    fn open(dir: &tempfile::TempDir, max_bytes: u64) -> LastAnswers {
+        LastAnswers::open(&crate::kv::open_db(&dir.path().join("kv")).unwrap(), max_bytes).unwrap()
+    }
+
+    /// A put that waits for the eviction it may start.
+    fn put(s: &mut LastAnswers, key: u64, l: Last) {
+        s.put(key, l);
+        s.settle();
+    }
+
     #[test]
-    fn saves_and_loads() {
+    fn survives_reopening() {
         let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("dns_state.snap");
-        let mut s = LastAnswers::open(&p, 1 << 20);
+        let mut s = open(&dir, 1 << 20);
         let l = Last::of(&lookup(&["192.0.2.1"], &["2001:db8::1"], &["a.example"]), 100);
         s.put(1, l);
+        s.put(1, l);
         s.save().unwrap();
-        let s = LastAnswers::open(&p, 1 << 20);
+        drop(s);
+        let s = open(&dir, 1 << 20);
         assert_eq!(s.len(), 1);
         assert_eq!(s.get(1), Some(l));
         assert_eq!(s.get(1).unwrap().v6(), vec!["2001:db8::1".parse::<Ipv6Addr>().unwrap()]);
-        std::fs::write(&p, b"garbage").unwrap();
-        assert!(LastAnswers::open(&p, 1 << 20).is_empty());
+        assert_eq!(s.get(2), None);
     }
 
     #[test]
     fn stays_under_cap_by_forgetting_oldest() {
         let dir = tempfile::tempdir().unwrap();
-        let mut s = LastAnswers::open(&dir.path().join("s"), 128 * 1024);
+        let mut s = open(&dir, 128 * 1024);
         let cap = s.max_len;
         let l = Last::of(&lookup(&["192.0.2.1"], &[], &[]), 0);
-        for i in 0..(cap as u64 * 3) {
-            s.put(i, Last { day: (i / 100) as u16, ..l });
+        for i in 0..(cap * 3) {
+            put(&mut s, i, Last { day: (i / 100) as u16, ..l });
         }
-        assert!(s.len() <= cap);
-        assert!(s.bytes_used() <= 128 * 1024, "{}", s.bytes_used());
-        assert!(s.get(cap as u64 * 3 - 1).is_some(), "newest kept");
+        assert!(s.len() as u64 <= cap);
+        assert_eq!(s.len(), s.table.len().unwrap(), "the count follows evictions");
+        assert!(s.get(cap * 3 - 1).is_some(), "newest kept");
         assert!(s.get(0).is_none(), "oldest forgotten");
     }
 
     #[test]
-    fn eviction_within_one_day_halves_keys_that_share_a_low_bit() {
-        // Survivors of an eviction by key bit all share that bit; one day's
-        // names must still be halved, or every put rebuilds the map for nothing.
+    fn eviction_within_one_day_halves() {
         let dir = tempfile::tempdir().unwrap();
-        let mut s = LastAnswers::open(&dir.path().join("s"), 128 * 1024);
-        let cap = s.max_len as u64;
+        let mut s = open(&dir, 128 * 1024);
+        let cap = s.max_len;
         let l = Last::of(&lookup(&["192.0.2.1"], &[], &[]), 7);
         for i in 0..cap {
-            s.put(i * 2, l);
+            put(&mut s, i * 2, l);
         }
         assert_eq!(s.len() as u64, cap);
-        s.put(cap * 2 + 2, l);
+        put(&mut s, cap * 2 + 2, l);
         assert!(s.len() as u64 <= cap / 2 + 1, "{} of {cap} left", s.len());
-        assert!(s.get(cap * 2 + 2).is_some(), "the new answer is kept");
     }
 
     #[test]
     fn eviction_drops_older_days_before_any_of_the_newest() {
         let dir = tempfile::tempdir().unwrap();
-        let mut s = LastAnswers::open(&dir.path().join("s"), 128 * 1024);
-        let cap = s.max_len as u64;
+        let mut s = open(&dir, 128 * 1024);
+        let cap = s.max_len;
         let l = Last::of(&lookup(&["192.0.2.1"], &[], &[]), 0);
         // A tenth of the names from day 1, the rest from day 2.
         for i in 0..cap {
-            s.put(i * 2, Last { day: if i < cap / 10 { 1 } else { 2 }, ..l });
+            put(&mut s, i * 2, Last { day: if i < cap / 10 { 1 } else { 2 }, ..l });
         }
-        s.put(cap * 2 + 2, Last { day: 2, ..l });
+        put(&mut s, cap * 2 + 2, Last { day: 2, ..l });
         assert!(s.len() as u64 <= cap / 2 + 1, "{} of {cap} left", s.len());
         assert!(s.get(0).is_none(), "an answer of the older day is forgotten first");
     }

@@ -44,7 +44,7 @@ async fn sigterm_commits_before_exit() {
     assert!(status.success(), "{status:?}");
 
     let data = d.path().join("data");
-    let pos = Positions::new(open_db(&data.join("state.redb")).unwrap());
+    let pos = Positions::new(open_db(&data.join("kv")).unwrap()).unwrap();
     assert_eq!(pos.all().unwrap(), [(0, 300)]);
     let rows: usize = list_parts(&data, "certs")
         .iter()

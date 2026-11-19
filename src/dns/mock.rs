@@ -88,9 +88,14 @@ fn answer(shared: &Shared, req: &Message, udp: bool) -> Option<Message> {
 
 impl MockDns {
     pub async fn start() -> MockDns {
-        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let addr = udp.local_addr().unwrap();
-        let tcp = TcpListener::bind(addr).await.unwrap();
+        // The TCP port of the same number may be taken; then try another.
+        let (udp, addr, tcp) = loop {
+            let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let addr = udp.local_addr().unwrap();
+            if let Ok(tcp) = TcpListener::bind(addr).await {
+                break (udp, addr, tcp);
+            }
+        };
         let shared = Arc::new(Shared::default());
         let s = shared.clone();
         let u = tokio::spawn(async move {

@@ -4,6 +4,7 @@ mod certs;
 mod domain;
 pub mod error;
 pub mod input;
+mod ip;
 
 use super::AppState;
 use axum::extract::State;
@@ -59,6 +60,7 @@ pub fn router() -> Router<AppState> {
         .route("/search", get(search))
         .route("/certs", get(certs::certs))
         .route("/domain/{domain}", get(domain::domain))
+        .route("/ip/{ip}", get(ip::ip))
         .method_not_allowed_fallback(not_found)
         .fallback(not_found)
 }

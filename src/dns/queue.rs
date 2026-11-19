@@ -1,18 +1,16 @@
 //! Names waiting for a later probe. A schedule that runs for 30 days must
 //! survive restarts and can hold tens of millions of names, so it lives in
-//! its own redb file, ordered by when each name is due. A crash loses at most
-//! the names taken out for probing but not yet probed. A second table orders
+//! the key-value store, in a keyspace ordered by when each name is due. A crash loses at most
+//! the names taken out for probing but not yet probed. A second keyspace orders
 //! the names by sighting, so a queue over its cap drops the oldest names.
 
+use crate::kv::{durable, keyspace, u64_of, Db};
 use crate::types::RenewalClass;
-use anyhow::{Context, Result};
-use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
-use std::path::Path;
+use anyhow::Result;
+use fjall::Keyspace;
 
-/// (due ms, name key) → encoded `Pending`.
-const WAITING: TableDefinition<(u64, u64), &[u8]> = TableDefinition::new("waiting");
-/// (seen ms, name key) → due ms, for every name in `WAITING`.
-const BY_SEEN: TableDefinition<(u64, u64), u64> = TableDefinition::new("by_seen");
+/// Number of waiting names, written with every batch.
+const LEN: &[u8] = b"dns_queue_len";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -116,42 +114,47 @@ impl Pending {
 }
 
 pub struct Queue {
-    db: Database,
+    db: Db,
+    waiting: Keyspace,
+    by_seen: Keyspace,
+    meta: Keyspace,
     adds: Vec<(u64, Pending)>,
     len: u64,
+    /// No waiting name is due before this, and none was seen before `seen_from`.
+    /// Scans start here: taken names leave tombstones at the head of both
+    /// orders, and a scan from the very start would walk all of them each time.
+    due_from: u128,
+    seen_from: u128,
+}
+
+fn pair(a: u64, b: u64) -> u128 {
+    (a as u128) << 64 | b as u128
+}
+
+fn split(k: &[u8]) -> Option<(u64, u64)> {
+    let k = u128::from_be_bytes(k.try_into().ok()?);
+    Some(((k >> 64) as u64, k as u64))
 }
 
 impl Queue {
-    pub fn open(path: &Path) -> Result<Queue> {
-        let db = Database::create(path).with_context(|| format!("opening {}", path.display()))?;
-        let tx = db.begin_write()?;
-        let len = {
-            let waiting = tx.open_table(WAITING)?;
-            let mut by_seen = tx.open_table(BY_SEEN)?;
-            // A queue written before the sighting index has none; build it once.
-            if by_seen.len()? != waiting.len()? {
-                by_seen.retain(|_, _| false)?;
-                for row in waiting.iter()? {
-                    let (k, v) = row?;
-                    let (due, key) = k.value();
-                    if let Some(p) = Pending::decode(v.value()) {
-                        by_seen.insert((seen_key(&p), key), due)?;
-                    }
-                }
-            }
-            waiting.len()?
+    pub fn open(db: &Db) -> Result<Queue> {
+        let waiting = keyspace(db, "dns_waiting")?;
+        let by_seen = keyspace(db, "dns_by_seen")?;
+        let meta = keyspace(db, "meta")?;
+        let len = match meta.get(LEN)?.and_then(|v| u64_of(&v)) {
+            Some(n) => n,
+            None => waiting.len()? as u64,
         };
-        tx.commit()?;
-        Ok(Queue { db, adds: Vec::new(), len })
+        Ok(Queue { db: db.clone(), waiting, by_seen, meta, adds: Vec::new(), len, due_from: 0, seen_from: 0 })
     }
 
     /// Keys of every waiting name, to rebuild the set of names in progress.
     pub fn keys(&self) -> Result<Vec<u64>> {
-        let tx = self.db.begin_read()?;
-        let t = tx.open_table(WAITING)?;
-        let mut out = Vec::with_capacity(t.len()? as usize);
-        for row in t.iter()? {
-            out.push(row?.0.value().1);
+        let mut out = Vec::with_capacity(self.len as usize);
+        for row in self.waiting.iter() {
+            if let Some((_, key)) = split(&row.key()?) {
+                out.push(key);
+            }
         }
         Ok(out)
     }
@@ -172,37 +175,71 @@ impl Queue {
     }
 
     /// Writes queued names and takes out up to `max` that are due by `now_ms`,
-    /// earliest first, in one transaction. Returns them with their due time.
+    /// earliest first, in one batch. Returns them with their due time.
     pub fn sync(&mut self, now_ms: i64, max: usize) -> Result<Vec<(i64, Pending)>> {
         if self.adds.is_empty() && max == 0 {
             return Ok(Vec::new());
         }
-        let tx = self.db.begin_write()?;
-        let mut out = Vec::new();
-        {
-            let mut t = tx.open_table(WAITING)?;
-            let mut by_seen = tx.open_table(BY_SEEN)?;
-            self.write_adds(&mut t, &mut by_seen)?;
-            if max > 0 && now_ms >= 0 {
-                let mut keys = Vec::new();
-                for row in t.range((0u64, 0u64)..=(now_ms as u64, u64::MAX))?.take(max) {
-                    let (k, v) = row?;
-                    let p = Pending::decode(v.value());
-                    keys.push((k.value(), p.as_ref().map(seen_key)));
-                    if let Some(p) = p {
-                        out.push((k.value().0 as i64, p));
-                    }
+        let mut batch = durable(&self.db);
+        // Candidates: the head of what is stored, and new names already due.
+        // A new name that is taken at once is never written.
+        let mut due: Vec<(u128, Option<Pending>, bool)> = Vec::new();
+        let mut later = Vec::new();
+        let take = max > 0 && now_ms >= 0;
+        let until = pair(now_ms.max(0) as u64, u64::MAX);
+        if take {
+            for row in self.waiting.range(self.due_from.to_be_bytes()..=until.to_be_bytes()).take(max) {
+                let (k, v) = row.into_inner()?;
+                if let Ok(k) = k.as_ref().try_into() {
+                    due.push((u128::from_be_bytes(k), Pending::decode(&v), true));
                 }
-                for (k, seen) in &keys {
-                    t.remove(k)?;
-                    if let Some(seen) = seen {
-                        by_seen.remove((*seen, k.1))?;
-                    }
-                }
-                self.len = t.len()?;
             }
         }
-        tx.commit()?;
+        for (at, p) in self.adds.drain(..) {
+            let k = pair(at, p.key);
+            if take && k <= until {
+                due.push((k, Some(p), false));
+            } else {
+                later.push((k, at, p));
+            }
+        }
+        due.sort_by_key(|d| d.0);
+        let mut len = self.len;
+        let (mut due_from, mut seen_from) = (self.due_from, self.seen_from);
+        let mut out = Vec::new();
+        for (i, (k, p, stored)) in due.into_iter().enumerate() {
+            let at = (k >> 64) as u64;
+            if i >= max {
+                // Only new names can be left over: at most `max` were read.
+                if let (Some(p), false) = (p, stored) {
+                    later.push((k, at, p));
+                }
+                continue;
+            }
+            if stored {
+                batch.remove(&self.waiting, k.to_be_bytes());
+                if let Some(p) = &p {
+                    batch.remove(&self.by_seen, pair(seen_key(p), p.key).to_be_bytes());
+                }
+                // Stored names are taken in order, so none is left before this one.
+                due_from = due_from.max(k.saturating_add(1));
+            }
+            len = len.saturating_sub(1);
+            if let Some(p) = p {
+                out.push((at as i64, p));
+            }
+        }
+        for (k, at, p) in later {
+            batch.insert(&self.waiting, k.to_be_bytes(), p.encode());
+            batch.insert(&self.by_seen, pair(seen_key(&p), p.key).to_be_bytes(), at.to_be_bytes());
+            due_from = due_from.min(k);
+            seen_from = seen_from.min(pair(seen_key(&p), p.key));
+        }
+        batch.insert(&self.meta, LEN, len.to_be_bytes());
+        batch.commit()?;
+        self.len = len;
+        self.due_from = due_from;
+        self.seen_from = seen_from;
         Ok(out)
     }
 
@@ -212,40 +249,27 @@ impl Queue {
         if self.len <= max {
             return Ok(Vec::new());
         }
-        let tx = self.db.begin_write()?;
+        self.sync(0, 0)?;
+        let excess = self.len.saturating_sub(max) as usize;
+        let mut batch = durable(&self.db);
         let mut dropped = Vec::new();
-        {
-            let mut t = tx.open_table(WAITING)?;
-            let mut by_seen = tx.open_table(BY_SEEN)?;
-            self.write_adds(&mut t, &mut by_seen)?;
-            let excess = t.len()?.saturating_sub(max) as usize;
-            let mut oldest = Vec::with_capacity(excess);
-            for row in by_seen.iter()?.take(excess) {
-                let (k, due) = row?;
-                oldest.push((k.value(), due.value()));
-            }
-            for ((seen, key), due) in oldest {
-                by_seen.remove((seen, key))?;
-                if t.remove((due, key))?.is_some() {
-                    dropped.push(key);
-                }
-            }
-            self.len = t.len()?;
+        let mut last = None;
+        for row in self.by_seen.range(self.seen_from.to_be_bytes()..).take(excess) {
+            let (k, v) = row.into_inner()?;
+            let (Some((seen, key)), Some(due)) = (split(&k), u64_of(&v)) else { continue };
+            batch.remove(&self.by_seen, k);
+            batch.remove(&self.waiting, pair(due, key).to_be_bytes());
+            dropped.push(key);
+            last = Some(pair(seen, key));
         }
-        tx.commit()?;
+        let len = self.len - dropped.len() as u64;
+        batch.insert(&self.meta, LEN, len.to_be_bytes());
+        batch.commit()?;
+        self.len = len;
+        if let Some(last) = last {
+            self.seen_from = last.saturating_add(1);
+        }
         Ok(dropped)
-    }
-
-    fn write_adds(
-        &mut self,
-        t: &mut redb::Table<(u64, u64), &[u8]>,
-        by_seen: &mut redb::Table<(u64, u64), u64>,
-    ) -> Result<()> {
-        for (due, p) in self.adds.drain(..) {
-            t.insert((due, p.key), p.encode().as_slice())?;
-            by_seen.insert((seen_key(&p), p.key), due)?;
-        }
-        Ok(())
     }
 }
 
@@ -256,6 +280,7 @@ fn seen_key(p: &Pending) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kv::open_db;
 
     fn p(name: &str, key: u64, attempt: u8) -> Pending {
         Pending {
@@ -273,14 +298,14 @@ mod tests {
     #[test]
     fn takes_due_names_in_order_and_survives_reopening() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("q.redb");
-        let mut q = Queue::open(&path).unwrap();
+        let path = dir.path().join("kv");
+        let mut q = Queue::open(&open_db(&path).unwrap()).unwrap();
         q.push(3_000, p("c.example", 3, 2));
         q.push(1_000, p("a.example", 1, 1));
         q.push(2_000, p("b.example", 2, 1));
         assert_eq!(q.sync(0, 0).unwrap(), vec![]);
         drop(q);
-        let mut q = Queue::open(&path).unwrap();
+        let mut q = Queue::open(&open_db(&path).unwrap()).unwrap();
         assert_eq!(q.len(), 3);
         let mut keys = q.keys().unwrap();
         keys.sort();
@@ -302,7 +327,7 @@ mod tests {
     #[test]
     fn trim_drops_the_names_seen_longest_ago() {
         let dir = tempfile::tempdir().unwrap();
-        let mut q = Queue::open(&dir.path().join("q.redb")).unwrap();
+        let mut q = Queue::open(&open_db(&dir.path().join("kv")).unwrap()).unwrap();
         // Due order differs from sighting order: trimming must follow the sighting.
         q.push(5_000, seen("old.example", 1, 100));
         q.push(1_000, seen("new.example", 2, 900));
@@ -319,7 +344,7 @@ mod tests {
     #[test]
     fn trim_keeps_a_queue_under_the_cap() {
         let dir = tempfile::tempdir().unwrap();
-        let mut q = Queue::open(&dir.path().join("q.redb")).unwrap();
+        let mut q = Queue::open(&open_db(&dir.path().join("kv")).unwrap()).unwrap();
         q.push(1_000, seen("a.example", 1, 100));
         assert_eq!(q.trim(5).unwrap(), Vec::<u64>::new());
         assert_eq!(q.len(), 1);
@@ -328,30 +353,11 @@ mod tests {
     #[test]
     fn names_taken_for_probing_are_not_trimmed_later() {
         let dir = tempfile::tempdir().unwrap();
-        let mut q = Queue::open(&dir.path().join("q.redb")).unwrap();
+        let mut q = Queue::open(&open_db(&dir.path().join("kv")).unwrap()).unwrap();
         q.push(1_000, seen("a.example", 1, 100));
         q.push(9_000, seen("b.example", 2, 200));
         assert_eq!(q.sync(5_000, 10).unwrap().len(), 1);
         assert_eq!(q.trim(0).unwrap(), vec![2]);
         assert!(q.is_empty());
-    }
-
-    #[test]
-    fn indexes_a_queue_written_before_the_sighting_index() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("q.redb");
-        {
-            let db = Database::create(&path).unwrap();
-            let tx = db.begin_write().unwrap();
-            {
-                let mut t = tx.open_table(WAITING).unwrap();
-                t.insert((5_000, 1), seen("old.example", 1, 100).encode().as_slice()).unwrap();
-                t.insert((1_000, 2), seen("new.example", 2, 900).encode().as_slice()).unwrap();
-            }
-            tx.commit().unwrap();
-        }
-        let mut q = Queue::open(&path).unwrap();
-        assert_eq!(q.trim(1).unwrap(), vec![1]);
-        assert_eq!(q.len(), 1);
     }
 }

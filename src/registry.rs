@@ -1,14 +1,13 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use redb::{Database, ReadableTable, TableDefinition};
+use fjall::Keyspace;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 
 use crate::config::Config;
+use crate::kv::{durable, keyspace, Db};
 use crate::types::LogId;
-
-const LOGS: TableDefinition<u16, &str> = TableDefinition::new("logs");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LogKind {
@@ -166,27 +165,19 @@ pub async fn load_specs(
 
 /// All logs ever followed, with `LogId`s that never change.
 pub struct Registry {
-    db: Arc<Database>,
+    db: Db,
+    table: Keyspace,
     logs: RwLock<Vec<LogInfo>>,
 }
 
 impl Registry {
-    pub fn open(db: Arc<Database>) -> Result<Registry> {
+    pub fn open(db: Db) -> Result<Registry> {
+        let table = keyspace(&db, "logs")?;
         let mut logs = Vec::new();
-        {
-            let tx = db.begin_read()?;
-            match tx.open_table(LOGS) {
-                Ok(t) => {
-                    for row in t.iter()? {
-                        let (_, v) = row?;
-                        logs.push(serde_json::from_str(v.value())?);
-                    }
-                }
-                Err(redb::TableError::TableDoesNotExist(_)) => {}
-                Err(e) => return Err(e.into()),
-            }
+        for row in table.iter() {
+            logs.push(serde_json::from_slice(&row.value()?)?);
         }
-        Ok(Registry { db, logs: RwLock::new(logs) })
+        Ok(Registry { db, table, logs: RwLock::new(logs) })
     }
 
     pub fn logs(&self) -> Vec<LogInfo> {
@@ -234,14 +225,11 @@ impl Registry {
             logs.push(info.clone());
             added.push(info);
         }
-        let tx = self.db.begin_write()?;
-        {
-            let mut t = tx.open_table(LOGS)?;
-            for l in logs.iter() {
-                t.insert(l.id, serde_json::to_string(l)?.as_str())?;
-            }
+        let mut b = durable(&self.db);
+        for l in logs.iter() {
+            b.insert(&self.table, l.id.to_be_bytes(), serde_json::to_vec(l)?);
         }
-        tx.commit()?;
+        b.commit()?;
         Ok(added)
     }
 
