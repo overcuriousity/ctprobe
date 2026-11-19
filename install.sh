@@ -81,6 +81,33 @@ add_dns_section() {
     fi
 }
 
+# The data directory the config names, or the unit's state directory.
+data_dir() {
+    d=$(sed -n 's/^[[:space:]]*data_dir[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' /etc/ctprobe/config.toml | head -n 1)
+    echo "${d:-/var/lib/ctprobe}"
+}
+
+# Data of releases before the key-value store moved to fjall cannot be read,
+# and the new binary refuses to start on it. Stops the service and names what
+# to delete instead of restarting it into a failure. Returns non-zero if there
+# is no such data.
+stop_on_old_data() {
+    d=$(data_dir)
+    found=""
+    for f in state.redb dns_queue.redb dns_state.snap; do
+        if as_root test -e "$d/$f"; then
+            found="$found $f"
+        fi
+    done
+    [ -n "$found" ] || return 1
+    as_root systemctl stop ctprobe >/dev/null 2>&1 || true
+    echo "$d holds data of an earlier ctprobe (found:$found), which this release cannot read."
+    echo "The service is stopped. Everything in that directory has to go, Parquet files included:"
+    as_root ls -A "$d" | sed 's/^/  /'
+    echo "Delete it and start afresh with:"
+    echo "  sudo find $d/ -mindepth 1 -delete && sudo systemctl start ctprobe"
+}
+
 # Keeps an existing config, so a reinstall only updates the binary and unit.
 install_service() {
     as_root install -d /etc/ctprobe
@@ -97,6 +124,9 @@ install_service() {
     as_root install -m 644 "$1/deploy/ctprobe.service" /etc/systemd/system/ctprobe.service
     as_root systemctl daemon-reload
     as_root systemctl enable ctprobe >/dev/null 2>&1
+    if stop_on_old_data; then
+        return 0
+    fi
     as_root systemctl restart ctprobe
     echo "Service started. Open http://127.0.0.1:8080"
     echo "Config: /etc/ctprobe/config.toml    Logs: journalctl -u ctprobe"

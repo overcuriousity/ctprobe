@@ -23,7 +23,7 @@ https://github.com/overcuriousity/overcuriousity-dev-manifest/tree/v2026.11.1/ma
 
 ## Must not change
 
-- `/api/v1` and the `/api/*` routes the pages use.
+- `/api/v1` and the `/api/*` routes the pages use. `/api/sql` and `/api/schema` were removed with the SQL page on purpose.
 - The installer one-liner, the release asset names `ctprobe-linux-<arch>.tar.gz` and their `.sha256` files.
 
 ## Layout

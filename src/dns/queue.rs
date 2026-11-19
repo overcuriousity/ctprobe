@@ -184,6 +184,8 @@ impl Queue {
         // Candidates: the head of what is stored, and new names already due.
         // A new name that is taken at once is never written.
         let mut due: Vec<(u128, Option<Pending>, bool)> = Vec::new();
+        // Sightings of stored names that could not be read.
+        let mut raw = std::collections::HashMap::new();
         let mut later = Vec::new();
         let take = max > 0 && now_ms >= 0;
         let until = pair(now_ms.max(0) as u64, u64::MAX);
@@ -191,7 +193,11 @@ impl Queue {
             for row in self.waiting.range(self.due_from.to_be_bytes()..=until.to_be_bytes()).take(max) {
                 let (k, v) = row.into_inner()?;
                 if let Ok(k) = k.as_ref().try_into() {
-                    due.push((u128::from_be_bytes(k), Pending::decode(&v), true));
+                    let (k, p) = (u128::from_be_bytes(k), Pending::decode(&v));
+                    if p.is_none() {
+                        raw.insert(k, seen_of(&v));
+                    }
+                    due.push((k, p, true));
                 }
             }
         }
@@ -218,8 +224,10 @@ impl Queue {
             }
             if stored {
                 batch.remove(&self.waiting, k.to_be_bytes());
-                if let Some(p) = &p {
-                    batch.remove(&self.by_seen, pair(seen_key(p), p.key).to_be_bytes());
+                // Also for a name that could not be read, where its sighting
+                // still can, so that no sighting row is left behind.
+                if let Some(seen) = p.as_ref().map(seen_key).or_else(|| raw.get(&k).copied().flatten()) {
+                    batch.remove(&self.by_seen, pair(seen, k as u64).to_be_bytes());
                 }
                 // Stored names are taken in order, so none is left before this one.
                 due_from = due_from.max(k.saturating_add(1));
@@ -254,14 +262,17 @@ impl Queue {
         let mut batch = durable(&self.db);
         let mut dropped = Vec::new();
         let mut last = None;
-        for row in self.by_seen.range(self.seen_from.to_be_bytes()..).take(excess) {
+        for row in self.by_seen.range(self.seen_from.to_be_bytes()..) {
+            if dropped.len() >= excess {
+                break;
+            }
             let (k, v) = row.into_inner()?;
             let (Some((seen, key)), Some(due)) = (split(&k), u64_of(&v)) else { continue };
             let at = pair(due, key).to_be_bytes();
             last = Some(pair(seen, key));
             batch.remove(&self.by_seen, k);
-            // A name whose stored form could not be read left this row
-            // behind when it was taken; it is not waiting and not counted.
+            // A name whose stored form could not be read may have left this
+            // row behind when it was taken; it is not waiting and not counted.
             if !self.waiting.contains_key(at)? {
                 continue;
             }
@@ -281,6 +292,12 @@ impl Queue {
 
 fn seen_key(p: &Pending) -> u64 {
     p.seen_at_ms.max(0) as u64
+}
+
+/// The sighting of a stored name that does not decode, where its header is whole.
+fn seen_of(b: &[u8]) -> Option<u64> {
+    let v = i64::from_le_bytes(b.get(19..27)?.try_into().ok()?);
+    Some(v.max(0) as u64)
 }
 
 #[cfg(test)]
@@ -376,9 +393,23 @@ mod tests {
         q.sync(0, 0).unwrap();
         // Left behind by a name that was taken but could not be read.
         q.by_seen.insert(pair(50, 9).to_be_bytes(), 500u64.to_be_bytes()).unwrap();
-        assert_eq!(q.trim(1).unwrap(), Vec::<u64>::new());
-        assert_eq!(q.len(), 2);
         assert_eq!(q.trim(1).unwrap(), vec![1]);
         assert_eq!(q.len(), 1);
+    }
+
+    #[test]
+    fn taking_a_name_that_does_not_read_also_removes_its_sighting() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut q = Queue::open(&open_db(&dir.path().join("kv")).unwrap()).unwrap();
+        q.push(1_000, seen("a.example", 1, 100));
+        q.sync(0, 0).unwrap();
+        // An unknown kind, so the name does not decode.
+        let at = pair(1_000, 1).to_be_bytes();
+        let mut v = q.waiting.get(at).unwrap().unwrap().to_vec();
+        v[0] = 9;
+        q.waiting.insert(at, v).unwrap();
+        assert_eq!(q.sync(5_000, 10).unwrap(), vec![]);
+        assert_eq!(q.len(), 0);
+        assert_eq!(q.by_seen.len().unwrap(), 0);
     }
 }

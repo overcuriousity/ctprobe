@@ -7,13 +7,26 @@ use crate::kv::{keyspace, Db};
 use anyhow::Result;
 use chrono::NaiveDate;
 use fjall::Keyspace;
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
+use xxhash_rust::xxh3::xxh3_64;
 
-/// Held for each read-then-write of an entry, so that expiry cannot remove an
-/// entry that probing has just renewed.
-static WRITE: Mutex<()> = Mutex::new(());
+/// One is held for each read-then-write of an entry, picked by a hash of its
+/// key, so that expiry cannot remove an entry that probing has just renewed
+/// and two writers of one entry cannot lose a day.
+static WRITE: [Mutex<()>; 64] = [const { Mutex::new(()) }; 64];
+
+fn lock(key: &[u8]) -> MutexGuard<'static, ()> {
+    WRITE[(xxh3_64(key) % WRITE.len() as u64) as usize].lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn key_of(ip: IpAddr, domain: &str) -> Vec<u8> {
+    let mut key = prefix(ip).to_vec();
+    key.extend_from_slice(domain.as_bytes());
+    key
+}
 
 #[derive(Clone)]
 pub struct IpIndex {
@@ -49,9 +62,8 @@ impl IpIndex {
     pub fn record(&self, v4: &[Ipv4Addr], v6: &[Ipv6Addr], domain: &str, day: u16) -> Result<()> {
         let ips = v4.iter().map(|a| IpAddr::V4(*a)).chain(v6.iter().map(|a| IpAddr::V6(*a)));
         for ip in ips {
-            let mut key = prefix(ip).to_vec();
-            key.extend_from_slice(domain.as_bytes());
-            let _held = WRITE.lock().unwrap_or_else(|e| e.into_inner());
+            let key = key_of(ip, domain);
+            let _held = lock(&key);
             let (first, last) = match self.table.get(&key)?.and_then(|v| days(&v)) {
                 Some((first, last)) if (first..=last).contains(&day) => continue,
                 Some((first, last)) => (first.min(day), last.max(day)),
@@ -96,13 +108,47 @@ impl IpIndex {
                 continue;
             }
             // The scan reads a view from its start; the entry may be newer by now.
-            let _held = WRITE.lock().unwrap_or_else(|e| e.into_inner());
+            let _held = lock(&k);
             if self.table.get(&k)?.is_some_and(|v| old(&v)) {
                 self.table.remove(k)?;
                 removed += 1;
             }
         }
         Ok(removed)
+    }
+}
+
+/// Hashes of entries written today, so that a name seen again does not read
+/// its entries from disk again.
+const RECENT_MAX: usize = 1 << 18;
+
+/// Writes to an `IpIndex`, skipping entries this writer has already made
+/// current today. Each writing thread has its own.
+pub struct Recorder {
+    ix: IpIndex,
+    day: u16,
+    done: HashSet<u64>,
+}
+
+impl Recorder {
+    pub fn new(ix: IpIndex) -> Recorder {
+        Recorder { ix, day: 0, done: HashSet::new() }
+    }
+
+    pub fn record(&mut self, v4: &[Ipv4Addr], v6: &[Ipv6Addr], domain: &str, day: u16) -> Result<()> {
+        if day != self.day || self.done.len() >= RECENT_MAX {
+            self.day = day;
+            self.done.clear();
+        }
+        let hash = |ip: IpAddr| xxh3_64(&key_of(ip, domain));
+        let v4: Vec<Ipv4Addr> = v4.iter().copied().filter(|a| !self.done.contains(&hash((*a).into()))).collect();
+        let v6: Vec<Ipv6Addr> = v6.iter().copied().filter(|a| !self.done.contains(&hash((*a).into()))).collect();
+        if v4.is_empty() && v6.is_empty() {
+            return Ok(());
+        }
+        self.ix.record(&v4, &v6, domain, day)?;
+        self.done.extend(v4.iter().map(|a| hash((*a).into())).chain(v6.iter().map(|a| hash((*a).into()))));
+        Ok(())
     }
 }
 
@@ -145,5 +191,20 @@ mod tests {
         assert_eq!(ix.expire(12).unwrap(), 2);
         assert_eq!(ix.lookup(b.into(), None, 10).unwrap(), vec![]);
         assert_eq!(ix.lookup(a.into(), None, 10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_recorder_writes_each_entry_once_a_day() {
+        let dir = tempfile::tempdir().unwrap();
+        let ix = IpIndex::open(&crate::kv::open_db(&dir.path().join("kv")).unwrap()).unwrap();
+        let mut r = Recorder::new(ix.clone());
+        let a: Ipv4Addr = "192.0.2.1".parse().unwrap();
+        r.record(&[a], &[], "a.example", 10).unwrap();
+        // Removed behind its back, so only a write that reaches the store brings it back.
+        ix.table.remove(key_of(a.into(), "a.example")).unwrap();
+        r.record(&[a], &[], "a.example", 10).unwrap();
+        assert_eq!(ix.lookup(a.into(), None, 10).unwrap(), vec![]);
+        r.record(&[a], &[], "a.example", 11).unwrap();
+        assert_eq!(ix.lookup(a.into(), None, 10).unwrap().len(), 1);
     }
 }

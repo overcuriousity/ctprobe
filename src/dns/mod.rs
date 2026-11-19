@@ -29,7 +29,7 @@ use crate::types::{CertRow, RenewalClass};
 use client::{query, query_name, Reply};
 use hdrhistogram::Histogram;
 use hickory_proto::rr::RecordType;
-use ipindex::IpIndex;
+use ipindex::{IpIndex, Recorder};
 use outcome::{combine, Lookup, Status};
 use queue::{Kind, Pending, Queue};
 use serde::Serialize;
@@ -58,6 +58,8 @@ const SYNC: Duration = Duration::from_millis(500);
 const SLOW_PASS: Duration = Duration::from_secs(1);
 /// Certificates taken from the queue in one pass, beyond the one that woke it.
 const JOBS_PER_PASS: usize = 1024;
+/// Threads that read and write the last answers and the address index.
+const STORE_THREADS: usize = 8;
 
 #[derive(Debug, Clone)]
 pub struct DnsOpts {
@@ -446,13 +448,15 @@ pub fn start(
         tracing::info!("DNS queue over {} names; dropped the {dropped} seen longest ago", cfg.queue_max);
     }
     let active: HashSet<u64> = queue.keys()?.into_iter().collect();
-    let sched = Scheduler::new(cfg, resolver, opts, last, ips, queue, active, out_tx, stats.clone());
+    let (stored_tx, stored_rx) = mpsc::unbounded_channel();
+    let store = Store::start(last.clone(), ips, stored_tx)?;
+    let sched = Scheduler::new(cfg, resolver, opts, last, store, queue, active, out_tx, stats.clone());
     let thread = std::thread::Builder::new().name("ctprobe-dns".into()).spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(rt) => rt,
             Err(e) => return tracing::error!("DNS runtime: {e}"),
         };
-        rt.block_on(sched.run(jobs_rx, stop));
+        rt.block_on(sched.run(jobs_rx, stored_rx, stop));
     })?;
     Ok((DnsLink { jobs: jobs_tx, out: out_rx, stats }, thread))
 }
@@ -478,6 +482,85 @@ type Replies = ((Reply, Duration), (Reply, Duration));
 struct Done {
     p: Pending,
     replies: Replies,
+}
+
+/// A probe with its answer, on its way to being stored and counted.
+struct Probed {
+    p: Pending,
+    lookup: Lookup,
+    reg: Option<String>,
+    latency_ms: u32,
+    now: i64,
+    today: u16,
+    /// For a conclusive answer, set by a store thread: the answer as stored
+    /// and the one it replaced.
+    stored: Option<(Last, Option<Last>)>,
+}
+
+/// The threads that store conclusive answers, so the scheduler never waits
+/// for the disk. A name always goes to the same thread, so its answers are
+/// read and written in the order they came. Each probe comes back through
+/// the channel given to `start` once stored.
+struct Store {
+    lanes: Vec<std_mpsc::Sender<Probed>>,
+    threads: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl Store {
+    fn start(last: LastAnswers, ips: IpIndex, back: mpsc::UnboundedSender<Probed>) -> anyhow::Result<Store> {
+        let mut store = Store { lanes: Vec::new(), threads: Vec::new() };
+        for i in 0..STORE_THREADS {
+            let (tx, rx) = std_mpsc::channel();
+            let (last, ips, back) = (last.clone(), ips.clone(), back.clone());
+            let t = std::thread::Builder::new()
+                .name(format!("ctprobe-dns-store-{i}"))
+                .spawn(move || store_lane(rx, last, Recorder::new(ips), back));
+            match t {
+                Ok(t) => {
+                    store.lanes.push(tx);
+                    store.threads.push(t);
+                }
+                Err(e) => {
+                    store.close();
+                    return Err(e.into());
+                }
+            }
+        }
+        Ok(store)
+    }
+
+    /// Hands a probe to the thread of its name, or gives it back if that has ended.
+    fn send(&self, p: Probed) -> Option<Probed> {
+        let lane = &self.lanes[(p.p.key % self.lanes.len() as u64) as usize];
+        lane.send(p).err().map(|e| e.0)
+    }
+
+    /// Waits until everything handed over is stored.
+    fn close(self) {
+        drop(self.lanes);
+        for t in self.threads {
+            let _ = t.join();
+        }
+    }
+}
+
+fn store_lane(
+    rx: std_mpsc::Receiver<Probed>,
+    last: LastAnswers,
+    mut ips: Recorder,
+    back: mpsc::UnboundedSender<Probed>,
+) {
+    while let Ok(mut p) = rx.recv() {
+        let cur = Last::of(&p.lookup, p.today);
+        let old = last.replace(p.p.key, cur);
+        if let Some(reg) = &p.reg {
+            if let Err(e) = ips.record(&p.lookup.v4, &p.lookup.v6, reg, p.today) {
+                tracing::warn!("writing the address index: {e:#}");
+            }
+        }
+        p.stored = Some((cur, old));
+        let _ = back.send(p);
+    }
 }
 
 fn histogram() -> Histogram<u64> {
@@ -514,7 +597,8 @@ struct Scheduler {
     opts: DnsOpts,
     resolver: SocketAddr,
     last: LastAnswers,
-    ips: IpIndex,
+    /// Taken at shutdown.
+    store: Option<Store>,
     queue: Queue,
     out: std_mpsc::SyncSender<DnsOut>,
     stats: Arc<DnsStats>,
@@ -584,6 +668,7 @@ impl Pass {
 /// What ended the wait at the top of a scheduler pass.
 enum Woke {
     Done(Done),
+    Stored(Probed),
     Job(Job),
     Tick,
 }
@@ -595,7 +680,7 @@ impl Scheduler {
         resolver: SocketAddr,
         opts: DnsOpts,
         last: LastAnswers,
-        ips: IpIndex,
+        store: Store,
         queue: Queue,
         active: HashSet<u64>,
         out: std_mpsc::SyncSender<DnsOut>,
@@ -619,7 +704,7 @@ impl Scheduler {
             opts,
             resolver,
             last,
-            ips,
+            store: Some(store),
             queue,
             out,
             stats,
@@ -643,7 +728,12 @@ impl Scheduler {
         }
     }
 
-    async fn run(mut self, mut jobs: mpsc::Receiver<Job>, mut stop: watch::Receiver<bool>) {
+    async fn run(
+        mut self,
+        mut jobs: mpsc::Receiver<Job>,
+        mut stored: mpsc::UnboundedReceiver<Probed>,
+        mut stop: watch::Receiver<bool>,
+    ) {
         let (done_tx, mut done_rx) = mpsc::unbounded_channel::<Done>();
         let mut tick = tokio::time::interval(TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -659,6 +749,7 @@ impl Scheduler {
             let woke = tokio::select! {
                 r = stop.changed() => if r.is_err() { break } else { Woke::Tick },
                 Some(d) = done_rx.recv() => Woke::Done(d),
+                Some(p) = stored.recv() => Woke::Stored(p),
                 j = jobs.recv() => match j {
                     Some(j) => Woke::Job(j),
                     None => break,
@@ -668,6 +759,7 @@ impl Scheduler {
             let mut pass = Pass::new();
             match woke {
                 Woke::Done(d) => self.finish(d),
+                Woke::Stored(p) => self.settle(p),
                 Woke::Job(j) => self.accept(j),
                 Woke::Tick => {}
             }
@@ -676,6 +768,9 @@ impl Scheduler {
             // the certificate queue until ingest drops names.
             while let Ok(d) = done_rx.try_recv() {
                 self.finish(d);
+            }
+            while let Ok(p) = stored.try_recv() {
+                self.settle(p);
             }
             pass.step("finish");
             for _ in 0..JOBS_PER_PASS {
@@ -712,6 +807,14 @@ impl Scheduler {
                     self.queue.len()
                 );
             }
+        }
+        // Probes handed to the store threads are stored and counted, so the
+        // names that need another probe are queued for it.
+        if let Some(s) = self.store.take() {
+            s.close();
+        }
+        while let Ok(p) = stored.try_recv() {
+            self.settle(p);
         }
         // Names taken out but not probed go back, so a restart misses none.
         for (due, p) in std::mem::take(&mut self.due) {
@@ -852,10 +955,10 @@ impl Scheduler {
         }
     }
 
+    /// Counts the queries of a probe and hands a conclusive answer to the
+    /// store threads; everything else about it is counted in `settle`.
     fn finish(&mut self, d: Done) {
-        self.in_flight -= 1;
         let now = now_ms();
-        let today = (now / MS_PER_DAY) as u16;
         let ((a, ta), (b, tb)) = &d.replies;
         let lookup = combine(a, b);
         for (r, t) in [(a, ta), (b, tb)] {
@@ -876,14 +979,39 @@ impl Scheduler {
                 self.latency.saturating_record(t.as_micros().max(1) as u64);
             }
         }
+        let probed = Probed {
+            reg: names::registered_domain(&d.p.name),
+            p: d.p,
+            latency_ms: ta.max(tb).as_millis().min(u32::MAX as u128) as u32,
+            now,
+            today: (now / MS_PER_DAY) as u16,
+            stored: None,
+            lookup,
+        };
+        if !probed.lookup.status.conclusive() {
+            return self.settle(probed);
+        }
+        let back = match &self.store {
+            Some(s) => s.send(probed),
+            None => Some(probed),
+        };
+        if let Some(p) = back {
+            tracing::warn!("DNS answer of {} not stored: the store threads have ended", p.p.name);
+            self.settle(p);
+        }
+    }
 
+    /// Counts a probe whose answer is stored, writes its row and queues its
+    /// next probe.
+    fn settle(&mut self, d: Probed) {
+        self.in_flight -= 1;
+        let (now, today, lookup) = (d.now, d.today, d.lookup);
         let p = d.p;
         let first = p.attempt == 0;
         let is_name = p.kind == Kind::Name;
         let mut prev = None;
-        if lookup.status.conclusive() {
-            let cur = Last::of(&lookup, today);
-            if let (true, Some(old)) = (first, self.last.get(p.key)) {
+        if let Some((cur, old)) = d.stored {
+            if let (true, Some(old)) = (first, old) {
                 let change = diff(&old, &cur, &lookup, today);
                 let g = &mut self.groups[group_index(p.kind)].g;
                 if change.days == 0 {
@@ -906,12 +1034,6 @@ impl Scheduler {
                     }
                 }
                 prev = Some((old, change));
-            }
-            self.last.put(p.key, cur);
-            if let Some(reg) = names::registered_domain(&p.name) {
-                if let Err(e) = self.ips.record(&lookup.v4, &lookup.v6, &reg, today) {
-                    tracing::warn!("writing the address index: {e:#}");
-                }
             }
         }
 
@@ -975,7 +1097,7 @@ impl Scheduler {
 
         let row = DnsRow {
             probed_at_ms: now,
-            reg_domain: names::registered_domain(&p.name),
+            reg_domain: d.reg,
             name: p.name.clone(),
             kind: p.kind,
             cert_hash: p.cert_hash,
@@ -983,7 +1105,7 @@ impl Scheduler {
             attempt: p.attempt,
             renewal: p.renewal.as_str(),
             lookup,
-            latency_ms: ta.max(tb).as_millis().min(u32::MAX as u128) as u32,
+            latency_ms: d.latency_ms,
             last_miss_ms: p.last_ms,
             prev,
         };

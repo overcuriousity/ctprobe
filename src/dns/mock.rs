@@ -89,11 +89,14 @@ fn answer(shared: &Shared, req: &Message, udp: bool) -> Option<Message> {
 impl MockDns {
     pub async fn start() -> MockDns {
         // The TCP port of the same number may be taken; then try another.
+        let mut tries = 0;
         let (udp, addr, tcp) = loop {
             let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
             let addr = udp.local_addr().unwrap();
-            if let Ok(tcp) = TcpListener::bind(addr).await {
-                break (udp, addr, tcp);
+            match TcpListener::bind(addr).await {
+                Ok(tcp) => break (udp, addr, tcp),
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && tries < 100 => tries += 1,
+                Err(e) => panic!("mock DNS: binding TCP on {addr}: {e}"),
             }
         };
         let shared = Arc::new(Shared::default());
