@@ -392,12 +392,6 @@ async fn contract_logs() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn contract_schema() {
-    let a = app(vec![], true).await;
-    a.pipe.shutdown().await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn sql_is_not_served() {
     let a = app(vec![], true).await;
     for path in ["/sql", "/api/sql?q=SELECT%201", "/api/schema"] {

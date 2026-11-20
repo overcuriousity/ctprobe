@@ -101,18 +101,21 @@ pub struct PipelineHandle {
     pub ips: IpIndex,
 }
 
-/// The redb file of releases before the key-value store moved to fjall.
-const OLD_STATE: &str = "state.redb";
+/// Files of releases before the key-value store moved to fjall.
+const OLD_FILES: [&str; 3] = ["state.redb", "dns_queue.redb", "dns_state.snap"];
 
 /// Fails on a data directory of such a release. Log ids and the commit epoch
 /// lived in redb and are not carried over; without them the rows already
-/// written would point at other logs.
+/// written would point at other logs, so the whole directory has to go, not
+/// only the old files.
 pub fn refuse_old_layout(data: &Path) -> Result<()> {
+    let old: Vec<&str> = OLD_FILES.into_iter().filter(|f| data.join(f).exists()).collect();
     anyhow::ensure!(
-        !data.join(OLD_STATE).exists(),
-        "{} was written by an earlier ctprobe and cannot be upgraded: its log ids are in {OLD_STATE}, \
-         which is no longer read. Start with an empty data directory",
-        data.display()
+        old.is_empty(),
+        "{} was written by an earlier ctprobe and cannot be upgraded ({} found). \
+         Stop ctprobe, delete everything in that directory, Parquet files included, and start again",
+        data.display(),
+        old.join(", ")
     );
     Ok(())
 }
@@ -914,8 +917,8 @@ mod tests {
     fn refuses_a_data_directory_of_the_redb_layout() {
         let d = tempfile::tempdir().unwrap();
         refuse_old_layout(d.path()).unwrap();
-        std::fs::write(d.path().join("state.redb"), b"").unwrap();
+        std::fs::write(d.path().join("dns_state.snap"), b"").unwrap();
         let e = refuse_old_layout(d.path()).unwrap_err().to_string();
-        assert!(e.contains("empty data directory"), "{e}");
+        assert!(e.contains("(dns_state.snap found)") && e.contains("delete everything"), "{e}");
     }
 }

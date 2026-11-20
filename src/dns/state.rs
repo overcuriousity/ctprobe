@@ -11,8 +11,9 @@ use fjall::Keyspace;
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 use xxhash_rust::xxh3::xxh3_64;
 
 pub const KEEP_V4: usize = 4;
@@ -168,14 +169,41 @@ pub fn diff(prev: &Last, cur: &Last, l: &Lookup, today: u16) -> Diff {
     }
 }
 
+/// Locks for writes of one key, so that counting a new answer and forgetting
+/// one cannot interleave. Picked by the low bits of the key.
+const STRIPES: usize = 64;
+/// How long a failed eviction waits before the next try.
+const EVICT_RETRY: Duration = Duration::from_secs(60);
+
+/// Shared by the threads that write answers; clones are handles to one store.
+#[derive(Clone)]
 pub struct LastAnswers {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
     table: Keyspace,
     meta: Keyspace,
-    len: Arc<AtomicU64>,
+    len: AtomicU64,
     max_len: u64,
-    evicting: Option<JoinHandle<()>>,
+    evictor: Mutex<Evictor>,
     /// Set at shutdown: a running eviction ends at its next answer.
-    stop: Arc<AtomicBool>,
+    stop: AtomicBool,
+    stripes: [Mutex<()>; STRIPES],
+}
+
+#[derive(Default)]
+struct Evictor {
+    running: Option<JoinHandle<Result<()>>>,
+    /// After a failed eviction, none starts before this.
+    retry_at: Option<Instant>,
+}
+
+impl Inner {
+    fn stripe(&self, key: &[u8]) -> MutexGuard<'_, ()> {
+        let i = key.last().copied().unwrap_or(0) as usize % STRIPES;
+        self.stripes[i].lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 fn encode(v: &Last) -> [u8; RECORD] {
@@ -248,23 +276,26 @@ impl LastAnswers {
         };
         let max_len = (max_bytes / ENTRY_BYTES).max(16);
         Ok(LastAnswers {
-            table,
-            meta,
-            len: Arc::new(AtomicU64::new(len)),
-            max_len,
-            evicting: None,
-            stop: Arc::default(),
+            inner: Arc::new(Inner {
+                table,
+                meta,
+                len: AtomicU64::new(len),
+                max_len,
+                evictor: Mutex::default(),
+                stop: AtomicBool::new(false),
+                stripes: std::array::from_fn(|_| Mutex::new(())),
+            }),
         })
     }
 
     /// Writes the count. The answers themselves are written as they change.
     pub fn save(&self) -> Result<()> {
-        self.meta.insert(LEN, self.len.load(Ordering::Relaxed).to_be_bytes())?;
+        self.inner.meta.insert(LEN, self.inner.len.load(Ordering::Relaxed).to_be_bytes())?;
         Ok(())
     }
 
     pub fn get(&self, key: u64) -> Option<Last> {
-        match self.table.get(key.to_be_bytes()) {
+        match self.inner.table.get(key.to_be_bytes()) {
             Ok(v) => v.and_then(|v| decode(&v)),
             Err(e) => {
                 tracing::warn!("reading DNS state: {e}");
@@ -273,19 +304,38 @@ impl LastAnswers {
         }
     }
 
-    pub fn put(&mut self, key: u64, last: Last) {
+    /// Stores `last` for `key` and returns the answer it replaces. One read
+    /// and one write; writes of different keys may run on several threads.
+    pub fn replace(&self, key: u64, last: Last) -> Option<Last> {
         let k = key.to_be_bytes();
-        let known = self.table.contains_key(k).unwrap_or(false);
-        if let Err(e) = self.table.insert(k, encode(&last)) {
-            return tracing::warn!("writing DNS state: {e}");
+        let s = &self.inner;
+        let held = s.stripe(&k);
+        let old = match s.table.get(k) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("reading DNS state: {e}");
+                return None;
+            }
+        };
+        if let Err(e) = s.table.insert(k, encode(&last)) {
+            tracing::warn!("writing DNS state: {e}");
+            return old.and_then(|v| decode(&v));
         }
-        if !known && self.len.fetch_add(1, Ordering::Relaxed) + 1 > self.max_len {
+        // Counted under the lock, so an eviction sees the write and its count together.
+        let over = old.is_none() && s.len.fetch_add(1, Ordering::Relaxed) + 1 > s.max_len;
+        drop(held);
+        if over {
             self.evict(key);
         }
+        old.and_then(|v| decode(&v))
+    }
+
+    pub fn put(&self, key: u64, last: Last) {
+        self.replace(key, last);
     }
 
     pub fn len(&self) -> usize {
-        self.len.load(Ordering::Relaxed) as usize
+        self.inner.len.load(Ordering::Relaxed) as usize
     }
 
     pub fn is_empty(&self) -> bool {
@@ -293,42 +343,56 @@ impl LastAnswers {
     }
 
     pub fn bytes_used(&self) -> u64 {
-        self.table.disk_space()
+        self.inner.table.disk_space()
     }
 
-    /// Starts forgetting the oldest half, unless that is already running. It
-    /// runs beside probing: scanning tens of millions of answers takes a while.
-    /// The answer of `keep`, whose writing started this, stays.
-    fn evict(&mut self, keep: u64) {
-        if self.evicting.as_ref().is_some_and(|h| !h.is_finished()) {
+    /// Starts forgetting the oldest half, unless that is already running or
+    /// the last try failed less than `EVICT_RETRY` ago. It runs beside
+    /// probing: scanning tens of millions of answers takes a while. The answer
+    /// of `keep`, whose writing started this, stays.
+    fn evict(&self, keep: u64) {
+        let mut ev = self.inner.evictor.lock().unwrap_or_else(|e| e.into_inner());
+        if ev.running.as_ref().is_some_and(|h| !h.is_finished()) {
             return;
         }
-        let (table, len, stop) = (self.table.clone(), self.len.clone(), self.stop.clone());
-        let spawned = std::thread::Builder::new().name("ctprobe-dns-evict".into()).spawn(move || {
-            if let Err(e) = evict_half(&table, &len, keep, &stop) {
-                tracing::warn!("evicting DNS state: {e:#}");
+        if let Some(h) = ev.running.take() {
+            if let Err(e) = h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("the eviction thread panicked"))) {
+                tracing::warn!("evicting DNS state: {e:#}; trying again in {}s", EVICT_RETRY.as_secs());
+                ev.retry_at = Some(Instant::now() + EVICT_RETRY);
             }
-        });
+        }
+        if ev.retry_at.is_some_and(|t| Instant::now() < t) {
+            return;
+        }
+        ev.retry_at = None;
+        let inner = self.inner.clone();
+        let spawned =
+            std::thread::Builder::new().name("ctprobe-dns-evict".into()).spawn(move || evict_half(&inner, keep));
         match spawned {
-            Ok(h) => self.evicting = Some(h),
-            Err(e) => tracing::warn!("evicting DNS state: {e}"),
+            Ok(h) => ev.running = Some(h),
+            Err(e) => {
+                tracing::warn!("evicting DNS state: {e}; trying again in {}s", EVICT_RETRY.as_secs());
+                ev.retry_at = Some(Instant::now() + EVICT_RETRY);
+            }
         }
     }
 
-    /// Waits for a running eviction.
+    /// Waits for a running eviction and returns how it ended.
     #[cfg(test)]
-    fn settle(&mut self) {
-        if let Some(h) = self.evicting.take() {
-            let _ = h.join();
-        }
+    fn settle(&self) -> Result<()> {
+        let h = self.inner.evictor.lock().unwrap().running.take();
+        h.map_or(Ok(()), |h| h.join().unwrap())
     }
 
     /// Ends a running eviction where it is, for shutdown. What it has not
     /// forgotten yet stays until the cap is reached again.
-    pub fn stop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(h) = self.evicting.take() {
-            let _ = h.join();
+    pub fn stop(&self) {
+        self.inner.stop.store(true, Ordering::Relaxed);
+        let h = self.inner.evictor.lock().unwrap_or_else(|e| e.into_inner()).running.take();
+        if let Some(h) = h {
+            if let Ok(Err(e)) = h.join() {
+                tracing::warn!("evicting DNS state: {e:#}");
+            }
         }
     }
 }
@@ -337,12 +401,17 @@ impl LastAnswers {
 /// cutoff day as are still needed. An answer rewritten while this runs may be
 /// forgotten with its old day; it then reads as unknown once. The answer of
 /// `keep` is not forgotten. Ends early once `stop` is set.
-fn evict_half(table: &Keyspace, len: &AtomicU64, keep: u64, stop: &AtomicBool) -> Result<()> {
-    let stopped = || stop.load(Ordering::Relaxed);
-    let before = len.load(Ordering::Relaxed);
+fn evict_half(s: &Inner, keep: u64) -> Result<()> {
+    let stopped = || s.stop.load(Ordering::Relaxed);
+    // The count and the view of the rows are taken at one moment: every write
+    // is then either in both or in neither.
+    let (before, rows) = {
+        let _all: Vec<_> = s.stripes.iter().map(|m| m.lock().unwrap_or_else(|e| e.into_inner())).collect();
+        (s.len.load(Ordering::Relaxed), s.table.iter())
+    };
     let mut days: BTreeMap<u16, usize> = BTreeMap::new();
     let mut count = 0u64;
-    for row in table.iter() {
+    for row in rows {
         if stopped() {
             return Ok(());
         }
@@ -355,10 +424,14 @@ fn evict_half(table: &Keyspace, len: &AtomicU64, keep: u64, stop: &AtomicBool) -
     let (cutoff, mut need) = cutoff_day(days, (count / 2) as usize);
     let mut removed = 0u64;
     let keep = keep.to_be_bytes();
-    for row in table.iter() {
+    // Lowers the count by what went, in one step, so new answers counted
+    // meanwhile on other threads are not lost.
+    let lower = |by: u64| {
+        let _ = s.len.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| Some(n.saturating_sub(by)));
+    };
+    for row in s.table.iter() {
         if stopped() {
-            // The scan is not complete, so the count is lowered, not corrected.
-            len.store(len.load(Ordering::Relaxed).saturating_sub(removed), Ordering::Relaxed);
+            lower(removed);
             tracing::info!("DNS state: eviction ended by shutdown after forgetting {removed} answers");
             return Ok(());
         }
@@ -377,13 +450,18 @@ fn evict_half(table: &Keyspace, len: &AtomicU64, keep: u64, stop: &AtomicBool) -
                 std::cmp::Ordering::Equal => false,
             };
         if go {
-            table.remove(k)?;
+            // Under the key's lock, so a write of it either counts as new
+            // after this or is the answer this forgets.
+            let _held = s.stripe(&k);
+            s.table.remove(k)?;
             removed += 1;
         }
     }
-    // Also corrects a count that drifted after a crash.
-    let now = len.load(Ordering::Relaxed);
-    len.store((count + now.saturating_sub(before)).saturating_sub(removed), Ordering::Relaxed);
+    // The first scan counted the answers there were; `before` is what the
+    // count said then. Their difference corrects a count that drifted after a crash.
+    let _ = s.len.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+        Some((n + count).saturating_sub(before).saturating_sub(removed))
+    });
     tracing::info!("DNS state at its cap: forgot the {removed} oldest answers of {count}");
     Ok(())
 }
@@ -464,15 +542,15 @@ mod tests {
     }
 
     /// A put that waits for the eviction it may start.
-    fn put(s: &mut LastAnswers, key: u64, l: Last) {
+    fn put(s: &LastAnswers, key: u64, l: Last) {
         s.put(key, l);
-        s.settle();
+        s.settle().unwrap();
     }
 
     #[test]
     fn survives_reopening() {
         let dir = tempfile::tempdir().unwrap();
-        let mut s = open(&dir, 1 << 20);
+        let s = open(&dir, 1 << 20);
         let l = Last::of(&lookup(&["192.0.2.1"], &["2001:db8::1"], &["a.example"]), 100);
         s.put(1, l);
         s.put(1, l);
@@ -488,14 +566,14 @@ mod tests {
     #[test]
     fn stays_under_cap_by_forgetting_oldest() {
         let dir = tempfile::tempdir().unwrap();
-        let mut s = open(&dir, 128 * 1024);
-        let cap = s.max_len;
+        let s = open(&dir, 128 * 1024);
+        let cap = s.inner.max_len;
         let l = Last::of(&lookup(&["192.0.2.1"], &[], &[]), 0);
         for i in 0..(cap * 3) {
-            put(&mut s, i, Last { day: (i / 100) as u16, ..l });
+            put(&s, i, Last { day: (i / 100) as u16, ..l });
         }
         assert!(s.len() as u64 <= cap);
-        assert_eq!(s.len(), s.table.len().unwrap(), "the count follows evictions");
+        assert_eq!(s.len(), s.inner.table.len().unwrap(), "the count follows evictions");
         assert!(s.get(cap * 3 - 1).is_some(), "newest kept");
         assert!(s.get(0).is_none(), "oldest forgotten");
     }
@@ -503,15 +581,15 @@ mod tests {
     #[test]
     fn eviction_within_one_day_halves() {
         let dir = tempfile::tempdir().unwrap();
-        let mut s = open(&dir, 128 * 1024);
-        let cap = s.max_len;
+        let s = open(&dir, 128 * 1024);
+        let cap = s.inner.max_len;
         let l = Last::of(&lookup(&["192.0.2.1"], &[], &[]), 7);
         for i in 0..cap {
-            put(&mut s, i * 2 + 2, l);
+            put(&s, i * 2 + 2, l);
         }
         assert_eq!(s.len() as u64, cap);
         // The lowest key of all, so an eviction in key order would take it first.
-        put(&mut s, 0, l);
+        put(&s, 0, l);
         assert!(s.len() as u64 <= cap / 2 + 1, "{} of {cap} left", s.len());
         assert!(s.get(0).is_some(), "the new answer is kept");
     }
@@ -522,26 +600,50 @@ mod tests {
         let s = open(&dir, 128 * 1024);
         let l = Last::of(&lookup(&["192.0.2.1"], &[], &[]), 7);
         for i in 0..100 {
-            s.table.insert((i as u64).to_be_bytes(), encode(&l)).unwrap();
+            s.inner.table.insert((i as u64).to_be_bytes(), encode(&l)).unwrap();
         }
-        s.len.store(100, Ordering::Relaxed);
-        s.stop.store(true, Ordering::Relaxed);
-        evict_half(&s.table, &s.len, 0, &s.stop).unwrap();
-        assert_eq!((s.len(), s.table.len().unwrap()), (100, 100));
+        s.inner.len.store(100, Ordering::Relaxed);
+        s.inner.stop.store(true, Ordering::Relaxed);
+        evict_half(&s.inner, 0).unwrap();
+        assert_eq!((s.len(), s.inner.table.len().unwrap()), (100, 100));
     }
 
     #[test]
     fn eviction_drops_older_days_before_any_of_the_newest() {
         let dir = tempfile::tempdir().unwrap();
-        let mut s = open(&dir, 128 * 1024);
-        let cap = s.max_len;
+        let s = open(&dir, 128 * 1024);
+        let cap = s.inner.max_len;
         let l = Last::of(&lookup(&["192.0.2.1"], &[], &[]), 0);
         // A tenth of the names from day 1, the rest from day 2.
         for i in 0..cap {
-            put(&mut s, i * 2, Last { day: if i < cap / 10 { 1 } else { 2 }, ..l });
+            put(&s, i * 2, Last { day: if i < cap / 10 { 1 } else { 2 }, ..l });
         }
-        put(&mut s, cap * 2 + 2, Last { day: 2, ..l });
+        put(&s, cap * 2 + 2, Last { day: 2, ..l });
         assert!(s.len() as u64 <= cap / 2 + 1, "{} of {cap} left", s.len());
         assert!(s.get(0).is_none(), "an answer of the older day is forgotten first");
+    }
+
+    #[test]
+    fn the_count_stays_right_while_several_threads_write_through_evictions() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir, 128 * 1024);
+        let cap = s.inner.max_len;
+        let l = Last::of(&lookup(&["192.0.2.1"], &[], &[]), 7);
+        std::thread::scope(|t| {
+            for w in 0..4u64 {
+                let s = s.clone();
+                t.spawn(move || {
+                    for i in 0..cap * 2 {
+                        // Some keys are written again, some are new.
+                        s.put(
+                            (i % (cap / 2)) * 8 + w + (i / (cap / 2)) * 1_000_000,
+                            Last { day: (i / 50) as u16, ..l },
+                        );
+                    }
+                });
+            }
+        });
+        s.settle().unwrap();
+        assert_eq!(s.len(), s.inner.table.len().unwrap(), "the count follows the rows");
     }
 }

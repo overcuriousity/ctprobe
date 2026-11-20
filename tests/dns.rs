@@ -221,7 +221,7 @@ async fn reports_ip_changes_and_keeps_answers_across_restarts() {
     // Thirty days ago, before a renewal, `moved` pointed elsewhere.
     {
         let db = ctprobe::kv::open_db(&dir.path().join("kv")).unwrap();
-        let mut last = LastAnswers::open(&db, 1 << 20).unwrap();
+        let last = LastAnswers::open(&db, 1 << 20).unwrap();
         let h = xxhash_rust::xxh3::xxh3_64(b"moved.example.com");
         last.put(h, Last::of(&resolved(&["192.0.2.1", "192.0.2.2"]), today - 30));
         last.save().unwrap();
