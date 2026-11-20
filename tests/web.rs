@@ -921,3 +921,31 @@ async fn dns_probes_reach_the_store_the_apis_and_trends() {
     assert_eq!(bad.status(), 400);
     a.pipe.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn feed_follows_commits_and_final_through_only_grows() {
+    let a = app(certs(&["one.feed.test", "two.feed.test"]), false).await;
+    let started = get_json(format!("{}/api/v1/feed", a.base)).await["final_through"].as_i64().unwrap();
+    let mut after = "0.0.0".to_string();
+    let mut rows = Vec::new();
+    let mut last_w = started;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while rows.len() < 2 {
+            let p = get_json(format!("{}/api/v1/feed?after={after}", a.base)).await;
+            let w = p["final_through"].as_i64().unwrap();
+            assert!(w >= last_w, "final_through went back");
+            last_w = w;
+            for r in p["rows"].as_array().unwrap() {
+                assert!(r["seen_at"].as_i64().unwrap() <= w, "row after final_through: {r}");
+                rows.push(r.clone());
+            }
+            after = p["next_cursor"].as_str().unwrap().to_string();
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .expect("feed did not deliver the certificates");
+    let mut names: Vec<String> = rows.iter().map(|r| r["names"][0].as_str().unwrap().to_string()).collect();
+    names.sort();
+    assert_eq!(names, vec!["one.feed.test", "two.feed.test"]);
+}

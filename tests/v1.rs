@@ -795,3 +795,129 @@ async fn unknown_domain_with_a_cursor_is_an_empty_page() {
     assert!(dns_rows(&p).is_empty() && p["dns"]["next_cursor"].is_null(), "{p}");
     assert!(p["cert_count"].is_null());
 }
+
+// --- /api/v1/feed ---
+
+fn on_log(mut r: CertRow, log: u16, new_names: u32) -> CertRow {
+    r.log = log;
+    r.new_names = new_names;
+    r
+}
+
+fn feed_key(r: &Value) -> (i64, i64, i64) {
+    (r["seen_at"].as_i64().unwrap(), r["log_id"].as_i64().unwrap(), r["entry_index"].as_i64().unwrap())
+}
+
+/// Every row from `after` on, one page of `limit` at a time.
+async fn walk_feed(a: &App, after: &str, limit: usize) -> (Vec<Value>, Value) {
+    let mut out = Vec::new();
+    let mut after = after.to_string();
+    for _ in 0..100 {
+        let p = page(a, &format!("/api/v1/feed?after={after}&limit={limit}")).await;
+        out.extend(p["rows"].as_array().unwrap().iter().cloned());
+        after = p["next_cursor"].as_str().unwrap().to_string();
+        if !p["more"].as_bool().unwrap() {
+            return (out, p);
+        }
+    }
+    panic!("feed did not finish");
+}
+
+fn end_of(ms: i64) -> String {
+    format!("{ms}.{}.{}", i32::MAX, i64::MAX)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn feed_pages_new_name_certs_in_order_once() {
+    let certs = vec![
+        on_log(cert(5, &["e.example.com"], D + 3000), 0, 1),
+        on_log(cert(1, &["a.example.com", "b.example.com"], D + 1000), 0, 2),
+        on_log(cert(3, &["c.example.com"], D + 2000), 1, 1),
+        on_log(cert(2, &["known.example.com"], D + 2000), 0, 0),
+        on_log(cert(4, &["d.example.com"], D + 2000), 0, 1),
+    ];
+    let a = app_with(Setup { certs, ..Default::default() }).await;
+    let (rows, last) = walk_feed(&a, &end_of(D), 1).await;
+    let keys: Vec<_> = rows.iter().map(feed_key).collect();
+    // seen_at, then log, then index; the certificate without a new name is left out.
+    assert_eq!(keys, vec![(D + 1000, 0, 1), (D + 2000, 0, 4), (D + 2000, 1, 3), (D + 3000, 0, 5)]);
+    assert_eq!(rows[0]["names"], serde_json::json!(["a.example.com", "b.example.com"]));
+    assert_eq!(rows[0]["san_count"], 2);
+    assert_eq!(rows[0]["new_names"], 2);
+    assert_eq!(rows[0]["issuer_cn"], "LE");
+    let w = last["final_through"].as_i64().unwrap();
+    assert!(w > D + 3000);
+    assert_eq!(last["next_cursor"], end_of(w));
+    // One big page gives the same rows.
+    let (big, _) = walk_feed(&a, &end_of(D), 10_000).await;
+    assert_eq!(big, rows);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn feed_resumes_inside_one_millisecond() {
+    let certs = (1..=4).map(|i| on_log(cert(i, &[&format!("n{i}.example.com")], D + 500), 0, 1)).collect();
+    let a = app_with(Setup { certs, ..Default::default() }).await;
+    let p = page(&a, &format!("/api/v1/feed?after={}.0.2", D + 500)).await;
+    let idx: Vec<_> = p["rows"].as_array().unwrap().iter().map(|r| r["entry_index"].as_i64().unwrap()).collect();
+    assert_eq!(idx, vec![3, 4]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn feed_without_after_starts_at_final_through() {
+    let a = app_with(Setup { certs: vec![cert(1, &["a.example.com"], D + 1000)], ..Default::default() }).await;
+    let p = page(&a, "/api/v1/feed").await;
+    assert!(p["rows"].as_array().unwrap().is_empty());
+    assert_eq!(p["more"], false);
+    let w = p["final_through"].as_i64().unwrap();
+    assert_eq!(p["next_cursor"], end_of(w));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn feed_holds_back_certs_after_final_through() {
+    let later = chrono::Utc::now().timestamp_millis() + 3_600_000;
+    let certs = vec![cert(1, &["now.example.com"], D + 1000), cert(2, &["later.example.com"], later)];
+    let a = app_with(Setup { certs, ..Default::default() }).await;
+    let (rows, last) = walk_feed(&a, &end_of(D), 100).await;
+    assert_eq!(rows.iter().map(feed_key).map(|k| k.2).collect::<Vec<_>>(), vec![1]);
+    let w = last["final_through"].as_i64().unwrap();
+    assert!(w < later);
+    assert_eq!(last["next_cursor"], end_of(w));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn feed_crosses_empty_days_and_compacted_ones() {
+    // Day D is compacted (sorted by domain, not time); day D+3 still has parts.
+    let certs = vec![
+        cert(1, &["zzz.example.com"], D + 1000),
+        cert(2, &["aaa.example.org"], D + 2000),
+        cert(3, &["mmm.example.net"], D + 3 * DAY_MS + 10),
+    ];
+    let a = app_with(Setup { certs, archive: vec![D], ..Default::default() }).await;
+    assert!(day_dir(&a, D).join("daily.parquet").exists());
+    let (rows, _) = walk_feed(&a, &end_of(D - DAY_MS), 1).await;
+    assert_eq!(rows.iter().map(feed_key).map(|k| k.2).collect::<Vec<_>>(), vec![1, 2, 3]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn feed_rejects_bad_input() {
+    let a = app().await;
+    for q in ["after=1.2", "after=x.1.2", "after=1.2.3.4", "limit=0", "limit=10001", "since=1"] {
+        let (s, _, b) = get(&a, &format!("/api/v1/feed?{q}")).await;
+        assert_eq!(s, 400, "{q}: {b}");
+        assert_eq!(code(&b), "bad_request");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn feed_has_its_own_slot() {
+    let a = app().await;
+    let _p1 = a.state.v1.enter(false).unwrap();
+    let _p2 = a.state.v1.enter(false).unwrap();
+    let (s, _, _) = get(&a, "/api/v1/feed").await;
+    assert_eq!(s, 200, "a full v1 gate must not turn the feed away");
+    let _f = a.state.v1.enter_feed().unwrap();
+    let (s, h, b) = get(&a, "/api/v1/feed").await;
+    assert_eq!(s, 429);
+    assert_eq!(code(&b), "busy");
+    assert_eq!(h["retry-after"], "1");
+}

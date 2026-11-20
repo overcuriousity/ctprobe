@@ -226,6 +226,9 @@ impl Pipeline {
         let db = open_db(&cfg.data_dir.join(crate::kv::DIR))?;
         let positions = Positions::new(db.clone())?;
         let epoch = positions.epoch()?;
+        // Everything on disk is committed, so it is final up to now; the
+        // stored value wins when the clock went back.
+        let final_through = positions.final_through()?.max(chrono::Utc::now().timestamp_millis());
         let registry = Arc::new(Registry::open(db.clone())?);
         let ips = IpIndex::open(&db)?;
         nightly::cleanup(&cfg.data_dir)?;
@@ -247,6 +250,7 @@ impl Pipeline {
 
         let live = Arc::new(LiveState::default());
         live.started_at_ms.store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
+        live.final_through_ms.store(final_through, Ordering::Release);
         *live.coverage_target.write().unwrap() = cfg.coverage_target;
         *live.history.lock().unwrap() = History::load(&cfg.data_dir.join(HISTORY_FILE), chrono::Utc::now().timestamp());
         let (feed, _) = broadcast::channel(1024);
@@ -340,6 +344,7 @@ impl Pipeline {
             feed: feed.clone(),
             cfg,
             epoch,
+            next_seen_ms: final_through + 1,
             commit_interval: opts.commit_interval,
             minute: opts.minute,
             snapshot_every: opts.snapshot_every,
@@ -505,6 +510,9 @@ struct Worker {
     feed: broadcast::Sender<Arc<FeedItem>>,
     cfg: Config,
     epoch: u64,
+    /// The least `seen_at` the next batch may get: after the last one given
+    /// and after the last commit's `final_through`.
+    next_seen_ms: i64,
     commit_interval: Duration,
     minute: Duration,
     snapshot_every: Duration,
@@ -600,7 +608,10 @@ impl Worker {
     }
 
     fn process(&mut self, batch: Batch, feed_budget: &mut u32) {
-        let now = chrono::Utc::now().timestamp_millis();
+        // Never earlier than a time already given or declared final, so
+        // `seen_at` follows processing order even when the clock steps back.
+        let now = chrono::Utc::now().timestamp_millis().max(self.next_seen_ms);
+        self.next_seen_ms = now;
         let today = (now / MS_PER_DAY) as u16;
         let parsed: Vec<_> = batch.entries.par_iter().map(extract).collect();
         let mut bad = 0u64;
@@ -890,11 +901,16 @@ impl Worker {
 
     fn commit(&mut self) -> Result<()> {
         let epoch = self.epoch + 1;
+        // At or after every `seen_at` given so far; later batches get more.
+        let final_through = chrono::Utc::now().timestamp_millis().max(self.next_seen_ms);
         self.writer.flush(epoch)?;
         self.tracker.commit_wal(epoch)?;
-        self.positions.commit_epoch(&self.commit_positions(), epoch)?;
+        self.positions.commit_epoch(&self.commit_positions(), epoch, final_through)?;
         self.writer.publish(epoch)?;
         self.epoch = epoch;
+        self.next_seen_ms = final_through + 1;
+        // After publish, so a reader that sees the value finds the files.
+        self.live.final_through_ms.store(final_through, Ordering::Release);
         self.save_history();
         Ok(())
     }

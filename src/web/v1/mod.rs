@@ -3,6 +3,7 @@
 mod certs;
 mod domain;
 pub mod error;
+mod feed;
 pub mod input;
 mod ip;
 
@@ -22,12 +23,16 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 const ALL_PERMITS: usize = 2;
 /// Of those, requests that read the archive.
 const ARCHIVE_PERMITS: usize = 1;
+/// Feed requests in flight. Separate from the others, so a follower is not
+/// turned away by searches and searches are not slowed by a catch-up.
+const FEED_PERMITS: usize = 1;
 
 /// Admission control for v1. Requests that find no permit fail at once with
 /// 429; they never queue.
 pub struct Gate {
     all: Arc<Semaphore>,
     archive: Arc<Semaphore>,
+    feed: Arc<Semaphore>,
 }
 
 /// Held for the life of a request; releases its permits on drop.
@@ -38,7 +43,11 @@ pub struct Permits {
 
 impl Gate {
     pub fn new() -> Gate {
-        Gate { all: Arc::new(Semaphore::new(ALL_PERMITS)), archive: Arc::new(Semaphore::new(ARCHIVE_PERMITS)) }
+        Gate {
+            all: Arc::new(Semaphore::new(ALL_PERMITS)),
+            archive: Arc::new(Semaphore::new(ARCHIVE_PERMITS)),
+            feed: Arc::new(Semaphore::new(FEED_PERMITS)),
+        }
     }
 
     pub fn enter(&self, archive: bool) -> Result<Permits, ApiError> {
@@ -46,6 +55,10 @@ impl Gate {
         let archive =
             if archive { Some(self.archive.clone().try_acquire_owned().map_err(|_| ApiError::Busy)?) } else { None };
         Ok(Permits { _all: all, _archive: archive })
+    }
+
+    pub fn enter_feed(&self) -> Result<OwnedSemaphorePermit, ApiError> {
+        self.feed.clone().try_acquire_owned().map_err(|_| ApiError::Busy)
     }
 }
 
@@ -59,6 +72,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/search", get(search))
         .route("/certs", get(certs::certs))
+        .route("/feed", get(feed::feed))
         .route("/domain/{domain}", get(domain::domain))
         .route("/ip/{ip}", get(ip::ip))
         .method_not_allowed_fallback(not_found)
