@@ -93,11 +93,33 @@ run it as the service's user, because files created as root stop the service rea
 | `GET /api/v1/certs` | One of `domain` or `q` (with `mode`, `distance`); filters `from`, `to`, `expires_from`, `expires_to`, `issuer`, `issuer_contains`, `tld`, `wildcard`; `limit`, `cursor`. One row per certificate and registered domain, newest first, from both tiers |
 | `GET /api/v1/domain/{domain}` | `limit`, `cursor`. `first_seen`, `last_seen` and `cert_count` from the index (null when only DNS rows exist), and `dns`: the address history, newest first, with the same `rows`, `next_cursor` and `cut_short` as certs |
 | `GET /api/v1/ip/{ip}` | `limit`, `cursor`. The registered domains whose names resolved to the address, in name order, each with the `first_seen` and `last_seen` day. Kept as long as DNS rows are |
+| `GET /api/v1/feed` | `after`, `limit` (default 1000, at most 10000). Every certificate with at least one name ctprobe had not seen, oldest first. See below |
 
 Errors have one shape, `{"error": {"code": "...", "message": "..."}}`, with codes `bad_request` (400),
 `not_found` (404), `busy` (429), `timeout` (504) and `internal` (500). Unknown `/api/v1` paths get it too.
 
 A request that finds no free slot is refused at once with 429 and `Retry-After: 1`; it never queues.
+
+### Following new certificates
+
+`/api/v1/feed` is for a program that wants every new certificate exactly once and keeps its own position.
+Each row has `seen_at`, `log_id`, `entry_index`, `issuer_cn`, `san_count`, `new_names` and `names`.
+A certificate is in the feed when at least one of its names was new to ctprobe; `names` lists all of them.
+
+- Rows come in `seen_at`, `log_id`, `entry_index` order, after the position in `after`.
+- `final_through`: every certificate with a `seen_at` at or before it has been stored, and none stored
+  later will have one. The feed returns nothing after it. It moves at each commit, about every five minutes.
+- `next_cursor` is the `after` of the next request. It is `<seen_at>.<log_id>.<entry_index>`, so a
+  client can store the three numbers. When `more` is false the page reached `final_through` and
+  `next_cursor` points past it, so quiet minutes move the position too.
+- `more: true` means more rows are waiting: ask again at once. Otherwise ask again after a while.
+- Without `after` the feed starts at `final_through`, with an empty page.
+- The feed reads the hot tier only, so it reaches back as far as `hot_days`.
+- It has one slot of its own, apart from the other `/api/v1` routes. A second request in flight gets 429.
+
+```sh
+curl -s 'http://127.0.0.1:8080/api/v1/feed?after=1763596800000.0.0&limit=1000'
+```
 Two requests run at once, and only one of them may read the archive.
 
 `limit` is 1 to 1000, default 100, and a value outside that is a 400. Follow `next_cursor` until it is null.

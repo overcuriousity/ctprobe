@@ -2,10 +2,12 @@
 //! so they cannot starve ingest.
 
 pub mod buckets;
+mod feed;
 mod search;
 mod sql;
 mod tiers;
 
+pub use feed::{FeedCursor, FeedPage, FeedRow};
 pub use search::{DomainHit, Mode};
 pub use sql::{quote, CertFilter, CertPage, CertScope, DnsFilter, QueryError, QueryResult, SortKey, MAX_OFFSET};
 pub use tiers::*;

@@ -98,6 +98,9 @@ pub struct Rates {
 #[derive(Default)]
 pub struct LiveState {
     pub started_at_ms: AtomicI64,
+    /// Every certificate with `seen_at` at or before this is published, and
+    /// none published later will have one. Set after each commit.
+    pub final_through_ms: AtomicI64,
     pub raw: AtomicU64,
     pub unique: AtomicU64,
     pub names: AtomicU64,
