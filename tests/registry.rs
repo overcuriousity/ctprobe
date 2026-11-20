@@ -78,7 +78,7 @@ fn spec(name: &str, id: &str) -> LogSpec {
 #[test]
 fn log_ids_stable_across_reopen() {
     let dir = tempfile::tempdir().unwrap();
-    let p = dir.path().join("state.redb");
+    let p = dir.path().join("kv");
     let (a, b);
     {
         let db = open_db(&p).unwrap();
@@ -105,14 +105,14 @@ fn log_ids_stable_across_reopen() {
 #[test]
 fn positions_commit_is_atomic() {
     let dir = tempfile::tempdir().unwrap();
-    let p = dir.path().join("state.redb");
+    let p = dir.path().join("kv");
     {
-        let pos = Positions::new(open_db(&p).unwrap());
+        let pos = Positions::new(open_db(&p).unwrap()).unwrap();
         assert_eq!(pos.get(1).unwrap(), None);
         pos.commit(&[(1, 10), (2, 20)]).unwrap();
         pos.commit(&[(1, 11)]).unwrap();
     }
-    let pos = Positions::new(open_db(&p).unwrap());
+    let pos = Positions::new(open_db(&p).unwrap()).unwrap();
     assert_eq!(pos.get(1).unwrap(), Some(11));
     assert_eq!(pos.get(2).unwrap(), Some(20));
 }
@@ -120,7 +120,7 @@ fn positions_commit_is_atomic() {
 #[test]
 fn empty_refresh_keeps_following_known_logs() {
     let dir = tempfile::tempdir().unwrap();
-    let r = Registry::open(open_db(&dir.path().join("s.redb")).unwrap()).unwrap();
+    let r = Registry::open(open_db(&dir.path().join("kv")).unwrap()).unwrap();
     r.ingest(vec![spec("a", "1")]).unwrap();
     assert!(r.merge_refresh(vec![], &[]).is_err());
     assert_eq!(r.logs()[0].state, "usable");
@@ -148,7 +148,7 @@ fn extra_only_log_is_selected() {
 #[test]
 fn failed_source_does_not_retire_its_logs() {
     let dir = tempfile::tempdir().unwrap();
-    let r = Registry::open(open_db(&dir.path().join("s.redb")).unwrap()).unwrap();
+    let r = Registry::open(open_db(&dir.path().join("kv")).unwrap()).unwrap();
     r.ingest(vec![sourced("g", "1", "g"), sourced("a", "2", "a")]).unwrap();
     r.ingest_keeping(vec![sourced("g", "1", "g")], &["a".to_string()]).unwrap();
     assert_eq!(r.logs().iter().find(|l| l.name == "a").unwrap().state, "usable");
@@ -159,16 +159,9 @@ fn failed_source_does_not_retire_its_logs() {
 #[test]
 fn old_stored_log_records_load() {
     let dir = tempfile::tempdir().unwrap();
-    let db = open_db(&dir.path().join("s.redb")).unwrap();
-    let t: redb::TableDefinition<u16, &str> = redb::TableDefinition::new("logs");
-    let tx = db.begin_write().unwrap();
-    {
-        let mut table = tx.open_table(t).unwrap();
-        let old =
-            r#"{"id":7,"name":"old","log_id_b64":"AA==","kind":{"Rfc6962":{"url":"https://o/"}},"state":"usable"}"#;
-        table.insert(7, old).unwrap();
-    }
-    tx.commit().unwrap();
+    let db = open_db(&dir.path().join("kv")).unwrap();
+    let old = r#"{"id":7,"name":"old","log_id_b64":"AA==","kind":{"Rfc6962":{"url":"https://o/"}},"state":"usable"}"#;
+    ctprobe::kv::keyspace(&db, "logs").unwrap().insert(7u16.to_be_bytes(), old).unwrap();
     let r = Registry::open(db).unwrap();
     let l = &r.logs()[0];
     assert_eq!((l.id, l.operator.as_str(), l.source.as_str()), (7, "", ""));
@@ -177,7 +170,7 @@ fn old_stored_log_records_load() {
 #[test]
 fn refresh_fills_in_operator_and_source() {
     let dir = tempfile::tempdir().unwrap();
-    let r = Registry::open(open_db(&dir.path().join("s.redb")).unwrap()).unwrap();
+    let r = Registry::open(open_db(&dir.path().join("kv")).unwrap()).unwrap();
     r.ingest(vec![spec("a", "1")]).unwrap();
     r.ingest(vec![LogSpec { operator: "Op".into(), ..sourced("a", "1", "g") }]).unwrap();
     assert_eq!((r.logs()[0].operator.as_str(), r.logs()[0].source.as_str()), ("Op", "g"));

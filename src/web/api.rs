@@ -22,7 +22,6 @@ pub fn error(code: StatusCode, msg: impl ToString) -> Response {
 
 pub fn query_error(e: QueryError) -> Response {
     let code = match e {
-        QueryError::NotAllowed(_) => StatusCode::BAD_REQUEST,
         QueryError::Timeout => StatusCode::GATEWAY_TIMEOUT,
         QueryError::Failed(_) => StatusCode::BAD_REQUEST,
     };
@@ -72,20 +71,6 @@ pub async fn history(State(s): State<AppState>, Query(q): Query<HistoryQuery>) -
     let now = chrono::Utc::now().timestamp();
     let view = s.pipe.live.history.lock().unwrap().view(q.minutes.unwrap_or(15), now);
     Json(view).into_response()
-}
-
-#[derive(Deserialize)]
-pub struct SqlQuery {
-    q: String,
-    limit: Option<usize>,
-    format: Option<String>,
-}
-
-pub async fn sql(State(s): State<AppState>, Query(q): Query<SqlQuery>) -> Response {
-    match s.engine.sql(&q.q, limit(q.limit)).await {
-        Ok(r) => respond(r, q.format.as_deref()),
-        Err(e) => query_error(e),
-    }
 }
 
 #[derive(Deserialize)]

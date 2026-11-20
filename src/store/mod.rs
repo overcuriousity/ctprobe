@@ -158,7 +158,12 @@ pub fn session(data: &Path, memory: usize, partitions: usize) -> Result<SessionC
     let tmp = data.join("tmp");
     std::fs::create_dir_all(&tmp)?;
     let rt = RuntimeEnvBuilder::new().with_memory_limit(memory, 1.0).with_temp_file_path(tmp).build_arc()?;
-    let cfg = SessionConfig::new().with_target_partitions(partitions.max(1));
+    // Filters run while decoding, so a lookup on an unsorted column reads that
+    // column alone and not every row in full.
+    let cfg = SessionConfig::new()
+        .with_target_partitions(partitions.max(1))
+        .set_bool("datafusion.execution.parquet.pushdown_filters", true)
+        .set_bool("datafusion.execution.parquet.reorder_filters", true);
     Ok(SessionContext::new_with_config_rt(cfg, rt))
 }
 

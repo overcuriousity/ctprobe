@@ -10,9 +10,6 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use datafusion::prelude::SessionContext;
 use serde::Serialize;
-use sqlparser::ast::Statement;
-use sqlparser::dialect::GenericDialect;
-use sqlparser::parser::Parser;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -25,8 +22,6 @@ const CERT_COLUMNS: &str = "seen_at, cn, primary_domain, issuer_cn, issuer_org, 
 
 #[derive(Debug, thiserror::Error)]
 pub enum QueryError {
-    #[error("only a single SELECT is allowed: {0}")]
-    NotAllowed(String),
     #[error("query timed out")]
     Timeout,
     #[error("{0}")]
@@ -200,16 +195,6 @@ const COUNT_TIMEOUT: Duration = Duration::from_secs(5);
 /// or rows repeat and go missing between pages.
 const NEWEST: &str = "seen_at DESC, log_id DESC, entry_index DESC";
 
-/// Accepts exactly one read-only query. DataFusion's own SQL also plans DDL,
-/// `COPY` and `SET`, so the check happens on the parsed statement.
-pub fn check_sql(q: &str) -> Result<(), QueryError> {
-    let stmts = Parser::parse_sql(&GenericDialect {}, q).map_err(|e| QueryError::NotAllowed(e.to_string()))?;
-    match stmts.as_slice() {
-        [Statement::Query(_)] => Ok(()),
-        _ => Err(QueryError::NotAllowed("not a single query".into())),
-    }
-}
-
 pub(super) fn to_result(batches: &[RecordBatch], schema: SchemaRef, limit: usize) -> Result<QueryResult> {
     let columns: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
     let mut w = arrow::json::ArrayWriter::new(Vec::new());
@@ -380,12 +365,6 @@ impl QueryEngine {
             tokio::time::timeout(timeout, work).await.map_err(|_| QueryError::Timeout)?
         });
         task.await.map_err(|e| QueryError::Failed(e.to_string()))?
-    }
-
-    /// User-supplied SQL, limited to a single read-only query.
-    pub async fn sql(&self, q: &str, limit: usize) -> Result<QueryResult, QueryError> {
-        check_sql(q)?;
-        self.run(q.to_string(), limit, None, None).await
     }
 
     /// Fixed internal SQL with a certificate time range.

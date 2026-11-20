@@ -4,6 +4,7 @@ pub mod dns;
 pub mod fetch;
 pub mod history;
 pub mod http;
+pub mod kv;
 pub mod loghealth;
 pub mod metrics;
 #[cfg(feature = "mock")]

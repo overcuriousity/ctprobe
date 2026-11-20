@@ -6,7 +6,7 @@ ctprobe follows public CT logs, removes duplicates and keeps rolling statistics 
 issuance rates, log health and coverage, issuers, key types, validity and new names and domains.
 It also resolves every name through its own Unbound resolver: how many get DNS, IPv4 and IPv6,
 how long a name takes to appear, and how addresses change between certificates.
-A web interface shows it live and offers crt.sh-style search and read-only SQL.
+A web interface shows it live and offers crt.sh-style search.
 
 It runs as one Linux binary and stores everything in one directory. It follows each log from its
 current head and does not backfill.
@@ -62,7 +62,7 @@ Then start it:
 | `[dns] resolver` | Recursive resolver for DNS probing, such as `"127.0.0.1:5335"`. Without it, nothing is probed |
 | `[dns] max_qps` | Queries per second to the resolver, default 2000. Each probe sends two, A and AAAA. Names that do not fit in a burst are skipped and counted |
 | `[dns] sample_pct` | Percent of names probed, default 100. Chosen by a hash of the name, so the same names are probed on every certificate |
-| `[dns] state_max` | Memory cap for the last answer per name, default `2GiB`. Over it, the oldest are forgotten and their changes go undetected |
+| `[dns] state_max` | Approximate disk cap for the last answer per name, default `2GiB`. It is applied as a count, about 19 million names at the default. Over it, the oldest half is forgotten and their changes go undetected. Their space is freed some time later, so the size on disk can stay above the cap for a while |
 | `[dns] queue_max` | Names waiting for a later probe, default 20000000 (about 2.5 GiB on disk). Over it, the names seen longest ago are dropped, counted as `dropped_full`, and get no further probes |
 
 DNS probing asks each name when its certificate is seen and, while it has no address, again from
@@ -92,6 +92,7 @@ run it as the service's user, because files created as root stop the service rea
 | `GET /api/v1/search` | `q`, `mode` (`exact`, `contains`, `levenshtein`, `homoglyph`), `distance`, `limit`. Domain hits from the permanent index |
 | `GET /api/v1/certs` | One of `domain` or `q` (with `mode`, `distance`); filters `from`, `to`, `expires_from`, `expires_to`, `issuer`, `issuer_contains`, `tld`, `wildcard`; `limit`, `cursor`. One row per certificate and registered domain, newest first, from both tiers |
 | `GET /api/v1/domain/{domain}` | `limit`, `cursor`. `first_seen`, `last_seen` and `cert_count` from the index (null when only DNS rows exist), and `dns`: the address history, newest first, with the same `rows`, `next_cursor` and `cut_short` as certs |
+| `GET /api/v1/ip/{ip}` | `limit`, `cursor`. The registered domains whose names resolved to the address, in name order, each with the `first_seen` and `last_seen` day. Kept as long as DNS rows are |
 
 Errors have one shape, `{"error": {"code": "...", "message": "..."}}`, with codes `bad_request` (400),
 `not_found` (404), `busy` (429), `timeout` (504) and `internal` (500). Unknown `/api/v1` paths get it too.

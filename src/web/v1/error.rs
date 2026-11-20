@@ -45,7 +45,6 @@ impl From<QueryError> for ApiError {
     fn from(e: QueryError) -> Self {
         match e {
             QueryError::Timeout => ApiError::Timeout,
-            QueryError::NotAllowed(m) => ApiError::BadRequest(m),
             QueryError::Failed(m) => ApiError::Internal(m),
         }
     }

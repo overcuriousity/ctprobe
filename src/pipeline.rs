@@ -7,6 +7,7 @@
 
 use crate::config::Config;
 use crate::coverage;
+use crate::dns::ipindex::{oldest_dns_day, IpIndex};
 use crate::dns::outcome::Status;
 use crate::dns::queue::Kind;
 use crate::dns::{self, DnsLink, DnsOpts, DnsOut, DnsStats};
@@ -26,7 +27,7 @@ use anyhow::{anyhow, Result};
 use hdrhistogram::Histogram;
 use rayon::prelude::*;
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -96,6 +97,24 @@ pub struct PipelineHandle {
     pub registry: Arc<Registry>,
     /// Present while DNS probing is configured.
     pub dns: Option<Arc<DnsStats>>,
+    /// Domains per address, written by DNS probing.
+    pub ips: IpIndex,
+}
+
+/// The redb file of releases before the key-value store moved to fjall.
+const OLD_STATE: &str = "state.redb";
+
+/// Fails on a data directory of such a release. Log ids and the commit epoch
+/// lived in redb and are not carried over; without them the rows already
+/// written would point at other logs.
+pub fn refuse_old_layout(data: &Path) -> Result<()> {
+    anyhow::ensure!(
+        !data.join(OLD_STATE).exists(),
+        "{} was written by an earlier ctprobe and cannot be upgraded: its log ids are in {OLD_STATE}, \
+         which is no longer read. Start with an empty data directory",
+        data.display()
+    );
+    Ok(())
 }
 
 const RUN: u8 = 0;
@@ -200,10 +219,12 @@ fn coverage_loop(live: Arc<LiveState>, data: PathBuf, every: Duration, stop: wat
 impl Pipeline {
     pub async fn start(cfg: Config, opts: PipelineOpts) -> Result<Pipeline> {
         std::fs::create_dir_all(&cfg.data_dir)?;
-        let db = open_db(&cfg.data_dir.join("state.redb"))?;
-        let positions = Positions::new(db.clone());
+        refuse_old_layout(&cfg.data_dir)?;
+        let db = open_db(&cfg.data_dir.join(crate::kv::DIR))?;
+        let positions = Positions::new(db.clone())?;
         let epoch = positions.epoch()?;
-        let registry = Arc::new(Registry::open(db)?);
+        let registry = Arc::new(Registry::open(db.clone())?);
+        let ips = IpIndex::open(&db)?;
         nightly::cleanup(&cfg.data_dir)?;
         let _ = std::fs::remove_dir_all(cfg.data_dir.join("tmp"));
         let writer = Writer::open(&cfg.data_dir, epoch)?;
@@ -230,7 +251,7 @@ impl Pipeline {
         let (stop, stop_rx) = watch::channel(false);
         let tasks = Arc::new(Mutex::new(Vec::new()));
         let (dns_link, dns_thread) = if cfg.dns.enabled() {
-            let (l, t) = dns::start(cfg.dns.clone(), opts.dns.clone(), &cfg.data_dir, stop.subscribe())?;
+            let (l, t) = dns::start(cfg.dns.clone(), opts.dns.clone(), &db, stop.subscribe())?;
             tracing::info!(
                 "probing names via the DNS resolver at {}",
                 cfg.dns.resolver.map(|r| r.to_string()).unwrap_or_default()
@@ -276,6 +297,7 @@ impl Pipeline {
 
         if opts.nightly {
             let cfg2 = cfg.clone();
+            let ips2 = ips.clone();
             let t = tokio::spawn(async move {
                 loop {
                     let today = chrono::Utc::now().date_naive();
@@ -283,6 +305,15 @@ impl Pipeline {
                         tracing::info!("nightly job for {day}");
                         if let Err(e) = nightly::run_nightly(&cfg2, day).await {
                             tracing::error!("nightly job for {day} failed: {e:#}");
+                        }
+                    }
+                    // The address index keeps what the DNS rows still back.
+                    if let Some(oldest) = oldest_dns_day(&cfg2.data_dir) {
+                        let ips = ips2.clone();
+                        match tokio::task::spawn_blocking(move || ips.expire(oldest)).await {
+                            Ok(Ok(n)) if n > 0 => tracing::info!("address index: forgot {n} expired entries"),
+                            Ok(Err(e)) => tracing::warn!("expiring the address index: {e:#}"),
+                            _ => {}
                         }
                     }
                     tokio::time::sleep(until_next_nightly(chrono::Utc::now())).await;
@@ -327,7 +358,7 @@ impl Pipeline {
         let thread = std::thread::Builder::new().name("ctprobe-pipeline".into()).spawn(move || ctx.run())?;
 
         Ok(Pipeline {
-            handle: PipelineHandle { live, feed, registry, dns: dns_stats },
+            handle: PipelineHandle { live, feed, registry, dns: dns_stats, ips },
             stop,
             mode,
             thread: Some(thread),
@@ -877,5 +908,14 @@ mod tests {
         assert_eq!(until_next_nightly(at(0, 0)), Duration::from_secs(1800));
         assert_eq!(until_next_nightly(at(0, 30)), Duration::from_secs(86400));
         assert_eq!(until_next_nightly(at(23, 30)), Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn refuses_a_data_directory_of_the_redb_layout() {
+        let d = tempfile::tempdir().unwrap();
+        refuse_old_layout(d.path()).unwrap();
+        std::fs::write(d.path().join("state.redb"), b"").unwrap();
+        let e = refuse_old_layout(d.path()).unwrap_err().to_string();
+        assert!(e.contains("empty data directory"), "{e}");
     }
 }

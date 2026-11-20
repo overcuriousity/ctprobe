@@ -1,6 +1,6 @@
 // German interface text. English is the source language. Text is swapped by
 // exact match on rendered nodes, so page code stays language-neutral. Anything
-// under [data-raw] (SQL results, PEM) is left exactly as it came.
+// under [data-raw] (PEM) is left exactly as it came.
 'use strict';
 // English unless German was chosen with the language button.
 const LANG = localStorage.getItem('lang') === 'de' ? 'de' : 'en';
@@ -67,7 +67,7 @@ const DE = {
   'A wildcard asked as written finds a wildcard record if one exists. The covered name is asked only when the certificate does not list it too.': 'Eine wörtlich abgefragte Wildcard findet einen Wildcard-Eintrag, falls einer existiert. Der abgedeckte Name wird nur abgefragt, wenn das Zertifikat ihn nicht ebenfalls enthält.',
   'Probing never slows ingest. A fixed sample of names, chosen by a hash of the name, is probed on every certificate. Names that do not fit the query budget in a burst are skipped and counted here.': 'Die Abfragen bremsen die Aufnahme nie. Eine feste, per Hash des Namens gewählte Stichprobe wird bei jedem Zertifikat abgefragt. Namen, die in einer Spitze nicht ins Abfragebudget passen, werden übersprungen und hier gezählt.',
   'The resolver says the name does not exist.': 'Der Resolver meldet, dass der Name nicht existiert.',
-  'Live': 'Live', 'Sizing': 'Dimensionierung', 'Trends': 'Trends', 'Search': 'Suche', 'SQL': 'SQL', 'Dark': 'Dunkel', 'Light': 'Hell', 'Domain': 'Domain', 'Certificate': 'Zertifikat',
+  'Live': 'Live', 'Sizing': 'Dimensionierung', 'Trends': 'Trends', 'Search': 'Suche', 'Dark': 'Dunkel', 'Light': 'Hell', 'Domain': 'Domain', 'Certificate': 'Zertifikat',
   'Rates, last 5 minutes': 'Raten, letzte 5 Minuten', 'Entries per second, all logs': 'Einträge pro Sekunde, alle Logs',
   'Processing stages since start': 'Verarbeitungsstufen seit Start', 'What each stage leaves for the next': 'Was jede Stufe für die nächste übrig lässt',
   'New certificates': 'Neue Zertifikate', 'Filtered text feed, at most 200 per second': 'Gefilterter Textfeed, höchstens 200 pro Sekunde', 'Filter by name': 'Nach Name filtern', 'Filter feed': 'Feed filtern', 'Logs': 'Logs',
@@ -116,8 +116,6 @@ const DE = {
   'Similar domains': 'Ähnliche Domains', 'Same label one edit away under any TLD, or visually confusable': 'Gleiches Label eine Änderung entfernt unter jeder TLD, oder optisch verwechselbar', 'None': 'Keine',
   'Only where this is the primary domain. Use All names in Search for certificates that list it as a further SAN.': 'Nur wo dies die primäre Domain ist. Für Zertifikate mit ihr als weiterem SAN nutzen Sie „Alle Namen“ in der Suche.',
   'Seen in Certificate Transparency since collection began.': 'Seit Beginn der Erfassung in Certificate Transparency gesehen.', 'Not seen since collection began. Platforms such as pages.dev are public suffixes, so each site on them is its own domain.': 'Seit Beginn der Erfassung nicht gesehen. Plattformen wie pages.dev sind öffentliche Suffixe, jede Website dort ist also eine eigene Domain.', 'No domain given.': 'Keine Domain angegeben.',
-  'Read-only. One SELECT, 30 second limit. Ctrl+Enter runs it.': 'Nur lesend. Ein SELECT, Limit 30 Sekunden. Strg+Enter führt es aus.', 'SQL query': 'SQL-Abfrage', 'Run': 'Ausführen', 'Example queries': 'Beispielabfragen', 'Examples': 'Beispiele', 'Tables': 'Tabellen', 'Running…': 'Läuft…', 'No rows': 'Keine Zeilen',
-  'Top issuers today': 'Häufigste Aussteller heute', 'Newest domains in a TLD': 'Neueste Domains einer TLD', 'Random sample of first-seen names': 'Zufallsstichprobe erstmals gesehener Namen',
   'Original': 'Original', 'Subject CN': 'Subject-CN', 'Serial': 'Seriennummer', 'Valid': 'Gültig', 'Key': 'Schlüssel', 'Signature': 'Signatur', 'SANs': 'SANs', 'Logged': 'Geloggt', 'Precertificate': 'Vorzertifikat', '(none)': '(keine)', '(no name)': '(kein Name)',
   'Fetched from the log.': 'Aus dem Log abgerufen.', 'Fetched from the log. Precertificates are stored as the TBSCertificate.': 'Aus dem Log abgerufen. Vorzertifikate liegen als TBSCertificate vor.',
   'Time': 'Zeit', 'Switch to light theme': 'Zum hellen Farbschema wechseln', 'Switch to dark theme': 'Zum dunklen Farbschema wechseln', 'Use the system theme': 'Farbschema des Systems verwenden', 'Use default text size': 'Normale Textgröße verwenden', 'Use compact text size': 'Kompakte Textgröße verwenden', 'Switch language': 'Sprache wechseln',

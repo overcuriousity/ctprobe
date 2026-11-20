@@ -13,6 +13,7 @@ use std::time::Duration;
 struct App {
     base: String,
     pipe: Pipeline,
+    engine: Arc<QueryEngine>,
     log: MockLog,
     _dir: tempfile::TempDir,
 }
@@ -74,11 +75,11 @@ async fn app_with(log: MockLog, dns: ctprobe::config::DnsConfig) -> App {
     };
     let pipe = Pipeline::start(cfg, opts).await.unwrap();
     let engine = Arc::new(QueryEngine::open(dir.path()).unwrap());
-    let state = web::AppState::new(engine, pipe.handle.clone());
+    let state = web::AppState::new(engine.clone(), pipe.handle.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(web::serve(listener, state));
-    App { base, pipe, log, _dir: dir }
+    App { base, pipe, engine, log, _dir: dir }
 }
 
 fn certs(names: &[&str]) -> Vec<MockEntry> {
@@ -105,13 +106,17 @@ async fn read_sse(url: &str, secs: u64, pred: impl Fn(&str) -> bool) -> String {
     text
 }
 
+/// Runs a query on the engine and gives the result as the JSON it serialises to.
+async fn sql(a: &App, q: &str) -> serde_json::Value {
+    serde_json::to_value(a.engine.internal(q.to_string(), 1000, None, None).await.unwrap()).unwrap()
+}
+
 /// Waits until `n` entries are readable, not merely received: commits run on a
 /// timer, and a loaded machine can take far longer than any fixed sleep.
 async fn wait_rows(a: &App, n: u64) {
-    let url = format!("{}/api/sql?q=SELECT%20COUNT(*)%20AS%20n%20FROM%20sightings", a.base);
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
-            let v = get_json(url.clone()).await;
+            let v = sql(a, "SELECT COUNT(*) AS n FROM sightings").await;
             if v["rows"][0][0].as_u64().is_some_and(|c| c >= n) {
                 return;
             }
@@ -389,20 +394,16 @@ async fn contract_logs() {
 #[tokio::test(flavor = "multi_thread")]
 async fn contract_schema() {
     let a = app(vec![], true).await;
-    ok(&a, "/api/schema", json!([{"columns": ["string"], "name": "string"}])).await;
     a.pipe.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn contract_sql() {
+async fn sql_is_not_served() {
     let a = app(vec![], true).await;
-    ok(&a, "/api/sql?q=SELECT%201%20AS%20x", json!({"columns": ["string"], "rows": [["number"]], "truncated": "bool"}))
-        .await;
-    let v = fetch(&a, "/api/sql?q=SELECT%201%20AS%20x,%20%27y%27%20AS%20z", 200, "application/json").await;
-    assert_eq!(cells(&v["rows"][0]), json!(["number", "string"]), "{v}");
-    assert_eq!(csv_header(&a, "/api/sql?q=SELECT%201%20AS%20x&format=csv").await, "x");
-    err(&a, "/api/sql?q=DROP%20TABLE%20certs", 400).await;
-    err(&a, "/api/sql?q=SELEC", 400).await;
+    for path in ["/sql", "/api/sql?q=SELECT%201", "/api/schema"] {
+        let r = reqwest::get(format!("{}{path}", a.base)).await.unwrap();
+        assert_eq!(r.status(), 404, "{path}");
+    }
     a.pipe.shutdown().await.unwrap();
 }
 

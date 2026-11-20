@@ -14,6 +14,7 @@
 //! budget in a burst are skipped and counted; later probes wait and run late.
 
 pub mod client;
+pub mod ipindex;
 #[cfg(feature = "mock")]
 pub mod mock;
 pub mod outcome;
@@ -21,19 +22,20 @@ pub mod queue;
 pub mod state;
 
 use crate::config::DnsConfig;
+use crate::kv::Db;
 use crate::names;
 use crate::rates::RateWindow;
 use crate::types::{CertRow, RenewalClass};
 use client::{query, query_name, Reply};
 use hdrhistogram::Histogram;
 use hickory_proto::rr::RecordType;
+use ipindex::IpIndex;
 use outcome::{combine, Lookup, Status};
 use queue::{Kind, Pending, Queue};
 use serde::Serialize;
 use state::{diff, Diff, Last, LastAnswers};
 use std::collections::{HashSet, VecDeque};
 use std::net::SocketAddr;
-use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc as std_mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -48,8 +50,6 @@ const OUT_QUEUE: usize = 262_144;
 const MAX_IN_FLIGHT: usize = 4096;
 /// Each query is tried twice before it counts as timed out.
 const TRIES: u32 = 2;
-pub const STATE_FILE: &str = "dns_state.snap";
-pub const QUEUE_FILE: &str = "dns_queue.redb";
 const TICK: Duration = Duration::from_millis(10);
 const PUBLISH: Duration = Duration::from_millis(250);
 /// How often waiting names are written and due ones taken out.
@@ -430,7 +430,7 @@ impl DnsLink {
 pub fn start(
     cfg: DnsConfig,
     opts: DnsOpts,
-    data: &Path,
+    db: &Db,
     stop: watch::Receiver<bool>,
 ) -> anyhow::Result<(DnsLink, std::thread::JoinHandle<()>)> {
     anyhow::ensure!(!opts.schedule.is_empty(), "empty DNS schedule");
@@ -438,14 +438,15 @@ pub fn start(
     let (jobs_tx, jobs_rx) = mpsc::channel(JOB_QUEUE);
     let (out_tx, out_rx) = std_mpsc::sync_channel(OUT_QUEUE);
     let stats = Arc::new(DnsStats { jobs_dropped: AtomicU64::new(0), report: Mutex::new(DnsReport::default()) });
-    let last = LastAnswers::open(&data.join(STATE_FILE), cfg.state_max_bytes);
-    let mut queue = Queue::open(&data.join(QUEUE_FILE))?;
+    let last = LastAnswers::open(db, cfg.state_max_bytes)?;
+    let ips = IpIndex::open(db)?;
+    let mut queue = Queue::open(db)?;
     let dropped = queue.trim(cfg.queue_max)?.len();
     if dropped > 0 {
         tracing::info!("DNS queue over {} names; dropped the {dropped} seen longest ago", cfg.queue_max);
     }
     let active: HashSet<u64> = queue.keys()?.into_iter().collect();
-    let sched = Scheduler::new(cfg, resolver, opts, last, queue, active, out_tx, stats.clone());
+    let sched = Scheduler::new(cfg, resolver, opts, last, ips, queue, active, out_tx, stats.clone());
     let thread = std::thread::Builder::new().name("ctprobe-dns".into()).spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(rt) => rt,
@@ -513,6 +514,7 @@ struct Scheduler {
     opts: DnsOpts,
     resolver: SocketAddr,
     last: LastAnswers,
+    ips: IpIndex,
     queue: Queue,
     out: std_mpsc::SyncSender<DnsOut>,
     stats: Arc<DnsStats>,
@@ -593,6 +595,7 @@ impl Scheduler {
         resolver: SocketAddr,
         opts: DnsOpts,
         last: LastAnswers,
+        ips: IpIndex,
         queue: Queue,
         active: HashSet<u64>,
         out: std_mpsc::SyncSender<DnsOut>,
@@ -616,6 +619,7 @@ impl Scheduler {
             opts,
             resolver,
             last,
+            ips,
             queue,
             out,
             stats,
@@ -717,6 +721,7 @@ impl Scheduler {
             tracing::warn!("saving DNS queue: {e:#}");
         }
         self.emit_minute();
+        self.last.stop();
         self.save();
     }
 
@@ -903,6 +908,11 @@ impl Scheduler {
                 prev = Some((old, change));
             }
             self.last.put(p.key, cur);
+            if let Some(reg) = names::registered_domain(&p.name) {
+                if let Err(e) = self.ips.record(&lookup.v4, &lookup.v6, &reg, today) {
+                    tracing::warn!("writing the address index: {e:#}");
+                }
+            }
         }
 
         self.report.probes += 1;

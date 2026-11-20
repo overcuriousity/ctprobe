@@ -4,7 +4,7 @@ use ctprobe::dns::mock::{MockAnswer, MockDns};
 use ctprobe::dns::outcome::{Lookup, Status};
 use ctprobe::dns::queue::Kind;
 use ctprobe::dns::state::{Last, LastAnswers};
-use ctprobe::dns::{self, DnsLink, DnsOpts, DnsOut, DnsReport, DnsRow, STATE_FILE};
+use ctprobe::dns::{self, DnsLink, DnsOpts, DnsOut, DnsReport, DnsRow};
 use ctprobe::types::{CertRow, ParsedCert, RenewalClass};
 use hickory_proto::rr::RecordType;
 use std::net::SocketAddr;
@@ -68,7 +68,8 @@ struct Run {
 impl Run {
     fn start(c: DnsConfig, o: DnsOpts, dir: &Path) -> Run {
         let (stop, rx) = watch::channel(false);
-        let (link, thread) = dns::start(c, o, dir, rx).unwrap();
+        let db = ctprobe::kv::open_db(&dir.join("kv")).unwrap();
+        let (link, thread) = dns::start(c, o, &db, rx).unwrap();
         Run { link, stop, thread, rows: Vec::new(), minutes: 0 }
     }
 
@@ -218,10 +219,13 @@ async fn reports_ip_changes_and_keeps_answers_across_restarts() {
     let dir = tempfile::tempdir().unwrap();
     let today = (chrono::Utc::now().timestamp_millis() / 86_400_000) as u16;
     // Thirty days ago, before a renewal, `moved` pointed elsewhere.
-    let mut last = LastAnswers::open(&dir.path().join(STATE_FILE), 1 << 20);
-    let h = xxhash_rust::xxh3::xxh3_64(b"moved.example.com");
-    last.put(h, Last::of(&resolved(&["192.0.2.1", "192.0.2.2"]), today - 30));
-    last.save().unwrap();
+    {
+        let db = ctprobe::kv::open_db(&dir.path().join("kv")).unwrap();
+        let mut last = LastAnswers::open(&db, 1 << 20).unwrap();
+        let h = xxhash_rust::xxh3::xxh3_64(b"moved.example.com");
+        last.put(h, Last::of(&resolved(&["192.0.2.1", "192.0.2.2"]), today - 30));
+        last.save().unwrap();
+    }
 
     let mut run = Run::start(cfg(m.addr()), opts(&[0]), dir.path());
     run.link.submit(&cert(1, &["moved.example.com", "same.example.com"], RenewalClass::Name));

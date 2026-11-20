@@ -7,10 +7,8 @@ use crate::query::buckets::{san_case, size_case, validity_case};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Response;
-use axum::Json;
 use chrono::{Duration, Utc};
 use serde::Deserialize;
-use serde_json::json;
 
 pub const METRICS: &[&str] = &[
     "volume",
@@ -270,22 +268,4 @@ pub async fn trends(State(s): State<AppState>, Path(metric): Path<String>, Query
         Ok(r) => respond(r, q.format.as_deref()),
         Err(e) => query_error(e),
     }
-}
-
-/// Tables and columns for the SQL page.
-pub async fn schema() -> Json<serde_json::Value> {
-    use crate::store::*;
-    let t = |name: &str, s: arrow::datatypes::SchemaRef| json!({ "name": name, "columns": s.fields().iter().map(|f| f.name().clone()).collect::<Vec<_>>() });
-    Json(json!([
-        t("certs", certs_schema()),
-        t("domains", domains_schema()),
-        t("sightings", sightings_schema()),
-        t("rollup_minute", rollup_minute_schema()),
-        t("rollup_daily", rollup_daily_schema()),
-        t("daily_stages", daily_stages_schema()),
-        t("daily_top", daily_top_schema()),
-        t("daily_coverage", daily_coverage_schema()),
-        t("dns", dns_schema()),
-        t("dns_minute", dns_minute_schema()),
-    ]))
 }

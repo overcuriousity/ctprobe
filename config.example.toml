@@ -27,7 +27,7 @@ resolver = "127.0.0.1:5335"
 max_qps = 2000
 # Percent of names probed, chosen by a hash of the name.
 sample_pct = 100
-# Memory for the last answer per name, used to detect changes.
+# Approximate disk space for the last answer per name, used to detect changes.
 state_max = "2GiB"
 # Names waiting for a later probe; over it, those seen longest ago are dropped.
 queue_max = 20000000
