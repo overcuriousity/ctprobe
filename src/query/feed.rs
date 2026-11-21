@@ -9,9 +9,9 @@
 use super::sql::MS_PER_DAY;
 use super::{QueryEngine, QueryError};
 use crate::store::{certs_schema, list_parts, register_files, session};
-use arrow::array::{Array, AsArray, RecordBatch};
+use arrow::array::{Array, AsArray, ListArray, RecordBatch};
 use arrow::compute::cast;
-use arrow::datatypes::{DataType, Field, Int32Type, Int64Type};
+use arrow::datatypes::{DataType, Field, Int32Type, Int64Type, UInt64Type};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -77,6 +77,21 @@ pub struct FeedRow {
     pub san_count: i32,
     pub new_names: i32,
     pub names: Vec<String>,
+    pub reg_domains: Vec<String>,
+    pub new_domains: i32,
+    /// The names that were new; `None` for a certificate stored before ctprobe
+    /// kept them.
+    pub new_name_list: Option<Vec<String>>,
+    /// The registered domains that were new; `None` as for `new_name_list`.
+    pub new_reg_domains: Option<Vec<String>>,
+    pub not_before: i64,
+    pub not_after: i64,
+    pub issuer_org: String,
+    pub renewal: String,
+    pub days_since_seen: Option<i32>,
+    pub is_wildcard: bool,
+    /// 16 lowercase hex digits: a u64 does not survive a JSON number.
+    pub cert_hash: String,
 }
 
 impl FeedRow {
@@ -177,7 +192,10 @@ async fn window(
     let FeedCursor { seen_at_ms: t, log_id: l, entry_index: i } = after;
     // Bare comparisons on `seen_at` so the Parquet statistics prune parts.
     let sql = format!(
-        "SELECT CAST(seen_at AS BIGINT) AS seen_ms, log_id, entry_index, issuer_cn, san_count, new_names, names \
+        "SELECT CAST(seen_at AS BIGINT) AS seen_ms, log_id, entry_index, issuer_cn, san_count, new_names, names, \
+                reg_domains, new_domains, new_name_list, new_reg_domains, \
+                CAST(not_before AS BIGINT) AS not_before_ms, CAST(not_after AS BIGINT) AS not_after_ms, \
+                issuer_org, renewal, days_since_seen, is_wildcard, cert_hash \
          FROM certs \
          WHERE new_names > 0 \
            AND seen_at <= to_timestamp_millis({hi}) \
@@ -197,24 +215,44 @@ async fn window(
 
 fn rows_of(b: &RecordBatch, out: &mut Vec<FeedRow>) -> Result<(), QueryError> {
     let col = |i: usize, t: &DataType| cast(b.column(i), t).map_err(|e| QueryError::Failed(e.to_string()));
+    let list_type = DataType::List(Arc::new(Field::new_list_field(DataType::Utf8, true)));
     let seen = col(0, &DataType::Int64)?;
     let log = col(1, &DataType::Int32)?;
     let index = col(2, &DataType::Int64)?;
     let issuer = col(3, &DataType::Utf8)?;
     let sans = col(4, &DataType::Int32)?;
     let new = col(5, &DataType::Int32)?;
-    let names = col(6, &DataType::List(Arc::new(Field::new_list_field(DataType::Utf8, true))))?;
+    let names = col(6, &list_type)?;
+    let regs = col(7, &list_type)?;
+    let new_domains = col(8, &DataType::Int32)?;
+    let new_list = col(9, &list_type)?;
+    let new_regs = col(10, &list_type)?;
+    let not_before = col(11, &DataType::Int64)?;
+    let not_after = col(12, &DataType::Int64)?;
+    let org = col(13, &DataType::Utf8)?;
+    let renewal = col(14, &DataType::Utf8)?;
+    let since = col(15, &DataType::Int32)?;
+    let wildcard = col(16, &DataType::Boolean)?;
+    let hash = col(17, &DataType::UInt64)?;
     let (seen, log, index) =
         (seen.as_primitive::<Int64Type>(), log.as_primitive::<Int32Type>(), index.as_primitive::<Int64Type>());
-    let (sans, new, issuer, names) = (
-        sans.as_primitive::<Int32Type>(),
-        new.as_primitive::<Int32Type>(),
-        issuer.as_string::<i32>(),
-        names.as_list::<i32>(),
+    let (sans, new, issuer) =
+        (sans.as_primitive::<Int32Type>(), new.as_primitive::<Int32Type>(), issuer.as_string::<i32>());
+    let (names, regs, new_list, new_regs) =
+        (names.as_list::<i32>(), regs.as_list::<i32>(), new_list.as_list::<i32>(), new_regs.as_list::<i32>());
+    let (new_domains, not_before, not_after) = (
+        new_domains.as_primitive::<Int32Type>(),
+        not_before.as_primitive::<Int64Type>(),
+        not_after.as_primitive::<Int64Type>(),
+    );
+    let (org, renewal, since, wildcard, hash) = (
+        org.as_string::<i32>(),
+        renewal.as_string::<i32>(),
+        since.as_primitive::<Int32Type>(),
+        wildcard.as_boolean(),
+        hash.as_primitive::<UInt64Type>(),
     );
     for r in 0..b.num_rows() {
-        let list = names.value(r);
-        let list = list.as_string::<i32>();
         out.push(FeedRow {
             seen_at: seen.value(r),
             log_id: log.value(r),
@@ -222,10 +260,31 @@ fn rows_of(b: &RecordBatch, out: &mut Vec<FeedRow>) -> Result<(), QueryError> {
             issuer_cn: issuer.value(r).to_string(),
             san_count: sans.value(r),
             new_names: new.value(r),
-            names: (0..list.len()).filter(|&j| list.is_valid(j)).map(|j| list.value(j).to_string()).collect(),
+            names: strings(names, r).unwrap_or_default(),
+            reg_domains: strings(regs, r).unwrap_or_default(),
+            new_domains: new_domains.value(r),
+            new_name_list: strings(new_list, r),
+            new_reg_domains: strings(new_regs, r),
+            not_before: not_before.value(r),
+            not_after: not_after.value(r),
+            issuer_org: org.value(r).to_string(),
+            renewal: renewal.value(r).to_string(),
+            days_since_seen: since.is_valid(r).then(|| since.value(r)),
+            is_wildcard: wildcard.value(r),
+            cert_hash: format!("{:016x}", hash.value(r)),
         });
     }
     Ok(())
+}
+
+/// The strings of list `r`, or `None` when the list itself is null.
+fn strings(l: &ListArray, r: usize) -> Option<Vec<String>> {
+    if l.is_null(r) {
+        return None;
+    }
+    let v = l.value(r);
+    let v = v.as_string::<i32>();
+    Some((0..v.len()).filter(|&j| v.is_valid(j)).map(|j| v.value(j).to_string()).collect())
 }
 
 #[cfg(test)]

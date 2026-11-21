@@ -1,3 +1,4 @@
+use arrow::array::RecordBatch;
 use chrono::NaiveDate;
 use ctprobe::config::Config;
 use ctprobe::dns::outcome::{Lookup, Status};
@@ -11,6 +12,8 @@ use ctprobe::registry::{LogKind, LogSpec};
 use ctprobe::store::Writer;
 use ctprobe::types::{CertRow, ParsedCert, RenewalClass};
 use ctprobe::{names, nightly, web};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::ArrowWriter;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -29,6 +32,9 @@ struct App {
 #[derive(Default)]
 struct Setup {
     certs: Vec<CertRow>,
+    /// Written first, then rewritten without the columns `certs` gained for
+    /// the feed, as parts from before them are.
+    old_certs: Vec<CertRow>,
     dns: Vec<DnsRow>,
     archive: Vec<i64>,
     timeout: Option<Duration>,
@@ -41,16 +47,27 @@ async fn app() -> App {
 async fn app_with(setup: Setup) -> App {
     let log = MockLog::start(MockOpts::rfc6962(0)).await;
     let dir = tempfile::tempdir().unwrap();
-    if !setup.certs.is_empty() || !setup.dns.is_empty() {
+    if !setup.old_certs.is_empty() {
         let mut w = Writer::open(dir.path(), 0).unwrap();
+        for r in setup.old_certs {
+            w.push_cert(r);
+        }
+        w.flush(1).unwrap();
+        w.publish(1).unwrap();
+        for p in ctprobe::store::list_parts(dir.path(), "certs") {
+            without_feed_columns(&p);
+        }
+    }
+    if !setup.certs.is_empty() || !setup.dns.is_empty() {
+        let mut w = Writer::open(dir.path(), 1).unwrap();
         for r in setup.certs {
             w.push_cert(r);
         }
         for r in setup.dns {
             w.push_dns(r);
         }
-        w.flush(1).unwrap();
-        w.publish(1).unwrap();
+        w.flush(2).unwrap();
+        w.publish(2).unwrap();
     }
     let cfg = Config {
         bind: "127.0.0.1:0".parse().unwrap(),
@@ -110,6 +127,24 @@ async fn app_with(setup: Setup) -> App {
     let base = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(web::serve(listener, state.clone()));
     App { base, state, _pipe: pipe, _log: log, _dir: dir }
+}
+
+/// The columns `certs` gained for the feed.
+const FEED_COLUMNS: [&str; 2] = ["new_name_list", "new_reg_domains"];
+
+/// Rewrites a `certs` part as one written before `FEED_COLUMNS` existed.
+fn without_feed_columns(p: &std::path::Path) {
+    let r = ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(p).unwrap()).unwrap().build().unwrap();
+    let batches: Vec<RecordBatch> = r.map(|b| b.unwrap()).collect();
+    let keep: Vec<usize> = (0..batches[0].num_columns())
+        .filter(|&i| !FEED_COLUMNS.contains(&batches[0].schema().field(i).name().as_str()))
+        .collect();
+    let old: Vec<RecordBatch> = batches.iter().map(|b| b.project(&keep).unwrap()).collect();
+    let mut w = ArrowWriter::try_new(std::fs::File::create(p).unwrap(), old[0].schema(), None).unwrap();
+    for b in &old {
+        w.write(b).unwrap();
+    }
+    w.close().unwrap();
 }
 
 async fn get(a: &App, path: &str) -> (u16, reqwest::header::HeaderMap, Value) {
@@ -242,6 +277,8 @@ fn cert(index: u64, names: &[&str], seen: i64) -> CertRow {
         days_since_seen: None,
         new_names: 1,
         new_domains: 1,
+        new_name_list: vec![names[0].to_string()],
+        new_reg_domains: names::registered_domain(names[0]).into_iter().collect(),
         log: 0,
         index,
         der_size: 100,
@@ -920,4 +957,79 @@ async fn feed_has_its_own_slot() {
     assert_eq!(s, 429);
     assert_eq!(code(&b), "busy");
     assert_eq!(h["retry-after"], "1");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn feed_rows_carry_what_certs_stores() {
+    let mut c = on_log(cert(7, &["a.example.com", "*.example.com", "b.other.org"], D + 1000), 2, 2);
+    c.new_name_list = vec!["a.example.com".into(), "b.other.org".into()];
+    c.new_reg_domains = vec!["other.org".into()];
+    c.new_domains = 1;
+    c.renewal = RenewalClass::Name;
+    c.days_since_seen = Some(12);
+    c.cert_hash = 0x00ab_cdef_0123_4567;
+    let mut plain = cert(8, &["c.example.net"], D + 2000);
+    plain.cert_hash = u64::MAX;
+    let a = app_with(Setup { certs: vec![c, plain], ..Default::default() }).await;
+    let (rows, _) = walk_feed(&a, &end_of(D), 100).await;
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(
+        rows[0],
+        serde_json::json!({
+            "seen_at": D + 1000,
+            "log_id": 2,
+            "entry_index": 7,
+            "issuer_cn": "LE",
+            "san_count": 3,
+            "new_names": 2,
+            "names": ["a.example.com", "*.example.com", "b.other.org"],
+            "reg_domains": ["example.com", "other.org"],
+            "new_domains": 1,
+            "new_name_list": ["a.example.com", "b.other.org"],
+            "new_reg_domains": ["other.org"],
+            "not_before": D + 1000,
+            "not_after": D + 1000 + 90 * DAY_MS,
+            "issuer_org": "Org",
+            "renewal": "name",
+            "days_since_seen": 12,
+            "is_wildcard": true,
+            "cert_hash": "00abcdef01234567",
+        })
+    );
+    assert_eq!(rows[1]["days_since_seen"], Value::Null);
+    assert_eq!(rows[1]["is_wildcard"], false);
+    assert_eq!(rows[1]["renewal"], "new");
+    assert_eq!(rows[1]["cert_hash"], "ffffffffffffffff");
+    assert_eq!(rows[1]["new_name_list"], serde_json::json!(["c.example.net"]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn feed_reads_parts_from_before_the_new_columns() {
+    // Without the archive both parts stay as they are; with it, nightly
+    // compacts the old part and the new one into one file and archives it.
+    for archive in [vec![], vec![D]] {
+        let old = cert(1, &["old.example.com"], D + 1000);
+        let new = cert(2, &["new.example.com"], D + 2000);
+        let a =
+            app_with(Setup { old_certs: vec![old], certs: vec![new], archive: archive.clone(), ..Default::default() })
+                .await;
+        assert_eq!(day_dir(&a, D).join("daily.parquet").exists(), !archive.is_empty());
+        let (feed, _) = walk_feed(&a, &end_of(D), 100).await;
+        assert_eq!(feed.iter().map(feed_key).map(|k| k.2).collect::<Vec<_>>(), vec![1, 2], "{archive:?}: {feed:?}");
+        assert_eq!(feed[0]["new_name_list"], Value::Null, "{archive:?}");
+        assert_eq!(feed[0]["new_reg_domains"], Value::Null, "{archive:?}");
+        assert_eq!(feed[0]["names"], serde_json::json!(["old.example.com"]));
+        assert_eq!(feed[0]["reg_domains"], serde_json::json!(["example.com"]));
+        assert_eq!(feed[0]["cert_hash"], "0000000000000001");
+        assert_eq!(feed[1]["new_name_list"], serde_json::json!(["new.example.com"]), "{archive:?}");
+        assert_eq!(feed[1]["new_reg_domains"], serde_json::json!(["example.com"]), "{archive:?}");
+        // Search reads the mix too, and its rows do not gain the new columns.
+        let rs = rows(&a, "/api/v1/certs?domain=example.com").await;
+        assert_eq!(indexes(&rs), vec![1, 2], "{archive:?}: {rs:?}");
+        for r in &rs {
+            for k in FEED_COLUMNS {
+                assert!(r.get(k).is_none() && r["detail"].get(k).is_none(), "{archive:?}: {r}");
+            }
+        }
+    }
 }

@@ -27,6 +27,8 @@ fn cert(hash: u64, names: &[&str], renewal: RenewalClass) -> CertRow {
         days_since_seen: None,
         new_names: 0,
         new_domains: 0,
+        new_name_list: vec![],
+        new_reg_domains: vec![],
         log: 0,
         index: hash,
         der_size: 0,

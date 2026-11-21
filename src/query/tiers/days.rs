@@ -29,11 +29,16 @@ pub(super) enum Start {
     After(CertCursor),
 }
 
-/// Columns of a schema, with timestamps as milliseconds.
+/// `certs` columns added for the feed, left out of `/api/v1/certs` rows so
+/// their shape stays as it was.
+const NOT_IN_ROWS: [&str; 2] = ["new_name_list", "new_reg_domains"];
+
+/// Columns of a schema, with timestamps as milliseconds, without `NOT_IN_ROWS`.
 pub(super) fn columns(schema: SchemaRef) -> String {
     schema
         .fields()
         .iter()
+        .filter(|f| !NOT_IN_ROWS.contains(&f.name().as_str()))
         .map(|f| match f.data_type() {
             DataType::Timestamp(..) => format!("CAST({0} AS BIGINT) AS {0}", f.name()),
             _ => f.name().to_string(),

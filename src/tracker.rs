@@ -240,7 +240,7 @@ impl Tracker {
 
         let mut hit = false;
         let mut smallest_gap: Option<u32> = None;
-        let mut new_names = 0;
+        let mut new_name_list = Vec::new();
         for n in &p.names {
             let h = xxh3_64(n.as_bytes());
             match self.get(NAMES, h) {
@@ -253,7 +253,7 @@ impl Tracker {
                     }
                 }
                 None => {
-                    new_names += 1;
+                    new_name_list.push(n.clone());
                     self.put(NAMES, h, today);
                 }
             }
@@ -269,14 +269,14 @@ impl Tracker {
         let mut reg_domains: Vec<String> = p.names.iter().filter_map(|n| names::registered_domain(n)).collect();
         reg_domains.sort_unstable();
         reg_domains.dedup();
-        let mut new_domains = 0;
+        let mut new_reg_domains = Vec::new();
         for d in &reg_domains {
             let h = xxh3_64(format!("d:{d}").as_bytes());
             match self.get(NAMES, h) {
                 Some(day) if day == today => {}
                 Some(_) => self.put(NAMES, h, today),
                 None => {
-                    new_domains += 1;
+                    new_reg_domains.push(d.clone());
                     self.put(NAMES, h, today);
                 }
             }
@@ -301,8 +301,10 @@ impl Tracker {
             is_precert: m.is_precert,
             renewal,
             days_since_seen: smallest_gap,
-            new_names,
-            new_domains,
+            new_names: new_name_list.len() as u32,
+            new_domains: new_reg_domains.len() as u32,
+            new_name_list,
+            new_reg_domains,
             log: m.log,
             index: m.index,
             der_size: m.der_size,

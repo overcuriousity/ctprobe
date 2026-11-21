@@ -58,6 +58,8 @@ fn row(serial: &str, domain: &str, seen: i64, issuer: &str, days: i64, renewal: 
         days_since_seen: None,
         new_names: 2,
         new_domains: 1,
+        new_name_list: vec![],
+        new_reg_domains: vec![],
         log: 0,
         index: 1,
         der_size: 100,

@@ -33,6 +33,8 @@ fn row(serial: &str, seen: i64) -> CertRow {
         days_since_seen: Some(60),
         new_names: 1,
         new_domains: 0,
+        new_name_list: vec![],
+        new_reg_domains: vec![],
         log: 7,
         index: 42,
         der_size: 900,

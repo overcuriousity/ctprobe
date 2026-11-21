@@ -307,6 +307,8 @@ mod tests {
             days_since_seen: None,
             new_names: 0,
             new_domains: 0,
+            new_name_list: vec![],
+            new_reg_domains: vec![],
             log: 0,
             index,
             der_size: 1,
