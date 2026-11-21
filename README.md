@@ -105,6 +105,17 @@ A request that finds no free slot is refused at once with 429 and `Retry-After: 
 `/api/v1/feed` is for a program that wants every new certificate exactly once and keeps its own position.
 Each row has `seen_at`, `log_id`, `entry_index`, `issuer_cn`, `san_count`, `new_names` and `names`.
 A certificate is in the feed when at least one of its names was new to ctprobe; `names` lists all of them.
+A row also has:
+
+- `reg_domains`: the registered domains of `names`, sorted; `new_domains`: how many of them were new.
+- `new_name_list` and `new_reg_domains`: which names and which registered domains were new. Both are
+  `null` for a certificate stored before ctprobe kept them.
+- `not_before`, `not_after` in milliseconds, `issuer_org`.
+- `renewal`: `exact` (ctprobe had seen this set of names), `name` (some of the names) or `new`.
+- `days_since_seen`: days since the most recently seen of its names was last seen, or `null`.
+- `is_wildcard`: whether a name starts with `*.`.
+- `cert_hash`: ctprobe's 64-bit certificate key as 16 lowercase hex digits, since a JSON number loses
+  precision above 2^53.
 
 - Rows come in `seen_at`, `log_id`, `entry_index` order, after the position in `after`.
 - `final_through`: every certificate with a `seen_at` at or before it has been stored, and none stored

@@ -341,6 +341,8 @@ fn certs_batch(rows: &[CertRow]) -> Result<RecordBatch> {
             i64c(&|r| r.sct_lag_ms),
             i64c(&|r| r.not_before_lag_ms),
             Arc::new(hash.finish()),
+            listc(&|r| &r.new_name_list),
+            listc(&|r| &r.new_reg_domains),
         ],
     )
 }

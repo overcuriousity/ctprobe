@@ -66,15 +66,21 @@ fn renewal_exact_vs_name_vs_new() {
     assert_eq!(r.renewal, RenewalClass::New);
     assert_eq!(r.days_since_seen, None);
     assert_eq!((r.new_names, r.new_domains), (2, 1));
+    assert_eq!(r.new_name_list, vec!["a.example.com", "b.example.com"]);
+    assert_eq!(r.new_reg_domains, vec!["example.com"]);
     let r = t.observe(meta(0), &cert("11", &["a.example.com", "b.example.com"]), 160).row.unwrap();
     assert_eq!(r.renewal, RenewalClass::Exact);
     assert_eq!(r.days_since_seen, Some(60));
     assert_eq!((r.new_names, r.new_domains), (0, 0));
+    assert!(r.new_name_list.is_empty() && r.new_reg_domains.is_empty());
     let r = t.observe(meta(0), &cert("12", &["a.example.com", "c.example.com"]), 170).row.unwrap();
     assert_eq!(r.renewal, RenewalClass::Name);
     assert_eq!(r.new_names, 1);
+    assert_eq!(r.new_name_list, vec!["c.example.com"]);
+    assert!(r.new_reg_domains.is_empty());
     let r = t.observe(meta(0), &cert("13", &["z.other.org"]), 170).row.unwrap();
     assert_eq!(r.renewal, RenewalClass::New);
+    assert_eq!((r.new_name_list, r.new_reg_domains), (vec!["z.other.org".to_string()], vec!["other.org".to_string()]));
 }
 
 #[test]

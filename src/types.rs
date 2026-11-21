@@ -60,6 +60,10 @@ pub struct CertRow {
     pub days_since_seen: Option<u32>,
     pub new_names: u32,
     pub new_domains: u32,
+    /// The names counted in `new_names`, in certificate order.
+    pub new_name_list: Vec<String>,
+    /// The registered domains counted in `new_domains`, sorted.
+    pub new_reg_domains: Vec<String>,
     pub log: LogId,
     pub index: u64,
     pub der_size: u32,

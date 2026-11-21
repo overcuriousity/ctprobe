@@ -51,6 +51,9 @@ schema!(
         ("sct_lag_ms", Int64, false),
         ("not_before_lag_ms", Int64, false),
         ("cert_hash", UInt64, false),
+        // Added after the first release, so older parts read them as null.
+        ("new_name_list", list(), true),
+        ("new_reg_domains", list(), true),
     ]
 );
 
