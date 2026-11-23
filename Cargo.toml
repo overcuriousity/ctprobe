@@ -35,7 +35,7 @@ x509-parser = "0.17"
 psl = "2"
 idna = "1"
 unicode-security = "0.1"
-hashbrown = "0.15"
+hashbrown = "0.17"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 hdrhistogram = "7"
 rayon = "1"
