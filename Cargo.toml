@@ -45,7 +45,7 @@ strsim = "0.11"
 chrono = { version = "0.4", features = ["serde"] }
 datafusion = "55"
 arrow = "59"
-parquet = { version = "59", features = ["arrow", "zstd"] }
+parquet = { version = "60", features = ["arrow", "zstd"] }
 memmap2 = "0.9"
 axum = "0.8"
 tower-http = { version = "0.7", features = ["set-header"] }
